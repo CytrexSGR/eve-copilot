@@ -325,6 +325,12 @@ Copy `.env.example` to `.env` and fill in your values. At minimum you need:
 
 ---
 
+## 💬 Using This?
+
+If you're running EVE Co-Pilot or building on it, I'd love to hear about it — drop a star, open an issue, or just say hi. It helps to know the project is useful to someone.
+
+---
+
 ## 🤝 Contributing
 
 Contributions welcome! Please:
