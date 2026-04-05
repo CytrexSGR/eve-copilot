@@ -325,3 +325,14 @@ MIT License - see [LICENSE](LICENSE) file for details.
 ---
 
 **Built by capsuleers, for capsuleers.** 🚀
+
+
+---
+
+## Authors
+
+**Andreas** — Architecture, Design, Direction
+**[Claude Code](https://claude.ai/code)** (Anthropic) — Implementation Partner
+
+> This project was built using vibe coding — human vision and AI implementation working as equals.
+
