@@ -1,6 +1,6 @@
 # EVE Co-Pilot - Production Deployment
 
-> **Back to:** [ARCHITECTURE.md](ARCHITECTURE.md) | **See also:** [Microservices](ARCHITECTURE.microservices.md) | [Data Layer](ARCHITECTURE.data.md)
+> **Back to:** [ARCHITECTURE.md](ARCHITECTURE.md) | **See also:** [Microservices](ARCHITECTURE.microservices.md)
 
 ---
 
@@ -8,11 +8,10 @@
 
 | Service | Value |
 |---------|-------|
-| **Domain** | `eve.infinimind-creations.com` |
+| **Domain** | `your-domain.com` |
 | **Server IP** | `your-server-ip` |
-| **Cloudflare** | ✅ Active (Proxied) |
-| **SSL** | Cloudflare Full (Strict) |
-| **VM** | Proxmox VM 100 |
+| **Reverse Proxy** | Cloudflare or nginx recommended |
+| **SSL** | Let's Encrypt or Cloudflare |
 
 ---
 

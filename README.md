@@ -59,6 +59,29 @@ Comprehensive intelligence, industry, fitting analysis, and alliance management 
   - Track pilot reshipments (deaths → new ship → return)
   - Alliance reship ratios indicate staging proximity and SRP strength
 
+### 🔍 Power Bloc & Entity Intelligence
+- **Power Bloc Analysis** - 13 analytical modules per bloc: offensive, defensive, capitals, geography, hunting, efficiency, timezone, supercaps, and more
+- **Capital Radar** - Capital ship sightings with escalation timeline tracking
+- **Logi Score** - Logistics shield strength assessment (0-100) for enemy fleet composition
+- **Hunting Intel** - Killmail + DOTLAN ADM fusion scoreboard for target identification
+- **Capsuleer Risk Assessment** - Pilot-level risk scoring with AWOX (friendly fire) detection
+- **Corp Health Dashboard** - Activity trends, efficiency metrics, member engagement analysis
+- **Threat Composition** - Who attacks, damage profiles, fleet doctrines used against you
+- **Entity Context Deduplication** - Corp/Alliance/Power Bloc queries share parameterized SQL (DRY architecture)
+
+### 🏛️ Sovereignty & Equinox
+- **System Topology** - 4,358 system graph with adjacency data
+- **Workforce Graph** - BFS-based workforce demand/supply analysis
+- **Skyhook Telemetry** - Resource extraction monitoring
+- **Metenox Drill Tracking** - Moon mining structure performance
+- **Sovereignty Simulator** - ADM projection and vulnerability analysis
+- **Asset Snapshots** - Point-in-time corp asset captures with delta analysis
+- **ESI Notification Pipeline** - Automated classification of ESI notifications into structure timers with jitter windows
+
+### 📡 MCP AI Integration
+- **600+ Dynamic Tools** - Auto-generated from OpenAPI specs across all services
+- **14 Semantic AI Tools** - Hand-crafted intelligence tools: alliance analysis, economy, ops, strategic assessment
+- **Domain-Based Activation** - Enable/disable tool groups per domain (e.g., only market tools for trading agents)
 
 ### 🌍 Planetary Industry (PI)
 - **Production Chain Analysis** - Full P0→P4 material chain visualization
@@ -107,6 +130,7 @@ Comprehensive intelligence, industry, fitting analysis, and alliance management 
 - **EFT Import/Export** - Paste EFT format, parse, preview, import to editor; export to clipboard
 - **Fit Comparison** - Side-by-side comparison of 2-4 fittings
 - **Custom Fittings** - Save, share, tag, browse shared fittings
+- **Killmail Fitting Analysis** - Dogma-based tank/DPS reconstruction from killmail data
 
 ### 🏢 Doctrine Engine
 - **Doctrine Stats** - Full Dogma-powered stats for corporation doctrines

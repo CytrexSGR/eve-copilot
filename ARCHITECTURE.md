@@ -1,8 +1,8 @@
 # EVE Co-Pilot Architecture
 
-> **Documentation Suite:** [Microservices](ARCHITECTURE.microservices.md) | [Data Layer](ARCHITECTURE.data.md) | [Deployment](ARCHITECTURE.deployment.md) | [Legacy/Monolith](ARCHITECTURE.legacy.md)
+> **Documentation Suite:** [Microservices](ARCHITECTURE.microservices.md) | [Deployment](ARCHITECTURE.deployment.md)
 
-> **Development Guides:** [Main Guide](CLAUDE.md) | [Backend](CLAUDE.backend.md) | [Frontend](CLAUDE.frontend.md) | [Services](CLAUDE.services.md) | [ESI API](CLAUDE.esi.md)
+> **Quick Start:** [README](README.md) | [Self-Hosted Setup](README.md#-self-hosted-setup)
 
 ---
 
@@ -83,8 +83,8 @@ echo '<SUDO_PASSWORD>' | sudo -S docker exec eve_db psql -U eve -d eve_sde
 
 | Component | Purpose | Documentation |
 |-----------|---------|---------------|
-| PostgreSQL (eve_db) | Primary database (SDE + 106 migrations, 136+ tables) | [Data Layer](ARCHITECTURE.data.md#postgresql) |
-| Redis | L1 cache, session storage, rate limiting, market stats cache | [Data Layer](ARCHITECTURE.data.md#redis) |
+| PostgreSQL (eve_db) | Primary database (SDE + 106 migrations, 136+ tables) | PostgreSQL |
+| Redis | L1 cache, session storage, rate limiting, market stats cache | Redis |
 
 ### Monitoring
 
@@ -638,23 +638,16 @@ async def mcp_analyze_alliance(
 | Document | Content |
 |----------|---------|
 | **[ARCHITECTURE.microservices.md](ARCHITECTURE.microservices.md)** | Microservices architecture, service details, Docker setup, API routing |
-| **[ARCHITECTURE.data.md](ARCHITECTURE.data.md)** | Database schema, caching strategy, data flows, migrations |
-| **[ARCHITECTURE.deployment.md](ARCHITECTURE.deployment.md)** | Production deployment, nginx config, security, monitoring |
-| **[ARCHITECTURE.legacy.md](ARCHITECTURE.legacy.md)** | ⛔ Monolith architecture (archived, historical reference) |
+| **[ARCHITECTURE.deployment.md](ARCHITECTURE.deployment.md)** | Production deployment, security, monitoring |
 
 ### Development Guides
 
 | Document | Content |
 |----------|---------|
-| **[CLAUDE.md](CLAUDE.md)** | Main development guide, credentials, quick start |
-| **[CLAUDE.services.md](CLAUDE.services.md)** | Service patterns, imports, repository pattern |
-| **[CLAUDE.backend.md](CLAUDE.backend.md)** | Backend API development |
-| **[CLAUDE.frontend.md](CLAUDE.frontend.md)** | React frontend development patterns |
-| **[CLAUDE.esi.md](CLAUDE.esi.md)** | EVE ESI API integration |
-| **[CLAUDE.local.md](CLAUDE.local.md)** | Current tasks, session history |
-| **[public-frontend/FEATURES.md](public-frontend/FEATURES.md)** | **Frontend feature documentation** - all 19 pages, components, APIs |
-| **[public-frontend/README.md](public-frontend/README.md)** | Public frontend overview, tech stack, quick start |
-| **[public-frontend/DEVELOPMENT.md](public-frontend/DEVELOPMENT.md)** | HMR dev workflow, best practices |
+| **[README.md](README.md)** | Project overview, features, getting started |
+| **[ARCHITECTURE.microservices.md](ARCHITECTURE.microservices.md)** | All 15 services with endpoints and test counts |
+| **[ARCHITECTURE.deployment.md](ARCHITECTURE.deployment.md)** | Production deployment and security |
+| **[public-frontend/README.md](public-frontend/README.md)** | Public frontend overview, tech stack |
 
 ---
 
