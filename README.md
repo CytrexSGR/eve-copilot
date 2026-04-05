@@ -6,53 +6,12 @@ Comprehensive intelligence, industry, fitting analysis, and alliance management 
 
 > ⚠️ **Alpha Software**: This project is in active development. Features may be incomplete, data may be inaccurate, and breaking changes can occur. Use at your own risk!
 
-## 🌐 Live Public Dashboard (Alpha)
-
-**[🚀 https://eve.infinimind-creations.com](https://eve.infinimind-creations.com)** ⚠️ Alpha Version
-
-Free real-time combat intelligence dashboard with:
-- ⚡ **Live Battle Tracking** - Real-time battle detection & updates every 5 seconds
-- 🗺️ **ectmap Integration** - Full EVE universe map with live battle overlays
-- 📊 **24-Hour Battle Reports** - Track combat activity across New Eden
-- 💰 **War Profiteering** - Most destroyed items and market opportunities
-- ⚔️ **Alliance Wars** - Active conflicts and combat statistics
-- 🛣️ **Trade Route Safety** - Danger analysis for cargo routes
-
-**No login required. Updates daily from zKillboard + ESI.**
-
-## 📱 Live Telegram Alerts
-
-**[📢 Join: t.me/infinimind_eve](https://t.me/infinimind_eve)**
-
-Get real-time combat intelligence delivered directly to your phone:
-
-### 🚨 Combat Hotspot Alerts (Real-time)
-Instant notifications when combat spikes are detected (5+ kills in 5 minutes):
-- 📍 System location with security status and region
-- 🔥 Kill count and activity rate
-- 💰 Total ISK destroyed with ship breakdowns
-- 🎯 Intelligent danger level (🟢 LOW → 🔴 EXTREME)
-- ⚔️ Attacking forces (alliances/corps involved)
-- 💀 Top 5 most expensive ship losses
-- 🚨 Gate camp detection with confidence rating
-
-### 📊 Scheduled Reports
-- **Battle Reports** - Every hour: 24h combat statistics, hot zones, peak activity
-- **Alliance Wars** - Every 30 minutes: Active conflicts, K/D ratios, efficiency ratings
-- **War Profiteering** - Every 6 hours: Most destroyed items, market opportunities
-
-**Alert cooldown:** 10 minutes per system to prevent spam during extended battles.
-
----
-
 ![Status](https://img.shields.io/badge/Status-Alpha-yellow)
 ![EVE Online](https://img.shields.io/badge/EVE-Online-orange)
 ![Python](https://img.shields.io/badge/Python-3.11+-blue)
 ![React](https://img.shields.io/badge/React-19-61DAFB)
 ![TypeScript](https://img.shields.io/badge/TypeScript-5-3178C6)
 ![License](https://img.shields.io/badge/License-MIT-green)
-![Website](https://img.shields.io/website?url=https%3A%2F%2Feve.infinimind-creations.com&label=Live)
-![Telegram](https://img.shields.io/badge/Telegram-Join%20Alerts-2CA5E0?logo=telegram)
 
 ---
 
@@ -360,9 +319,7 @@ MIT License - see [LICENSE](LICENSE) file for details.
 
 ## 🔗 Links
 
-- **Live Dashboard:** https://eve.infinimind-creations.com
-- **Telegram Alerts:** https://t.me/infinimind_eve
-- **GitHub Issues:** https://github.com/CytrexSGR/Eve-Online-Copilot/issues
+- **GitHub Issues:** https://github.com/CytrexSGR/eve-copilot/issues
 - **EVE Online:** https://www.eveonline.com
 
 ---
