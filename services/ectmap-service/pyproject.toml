@@ -1,0 +1,21 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "eve-ectmap-service"
+version = "1.0.0"
+description = "EVE Co-Pilot ECTMap Service - Screenshot Generation API"
+requires-python = ">=3.11"
+
+dependencies = [
+    "fastapi==0.109.0",
+    "uvicorn==0.27.0",
+    "playwright==1.41.0",
+    "pydantic==2.5.3",
+    "pydantic-settings==2.1.0",
+    "psycopg2-binary==2.9.9",
+    "python-multipart==0.0.6",
+    "aiofiles==23.2.1",
+    "httpx==0.26.0",
+]

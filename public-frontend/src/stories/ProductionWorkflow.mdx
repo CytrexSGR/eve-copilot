@@ -1,0 +1,670 @@
+import { Meta } from '@storybook/addon-docs/blocks';
+
+<Meta title="Docs/Production Workflow" />
+
+# Production Suite -- Make or Buy
+
+The Production Suite is the manufacturing decision engine of the EVE Co-Pilot. It answers the core industrialist question: **"Should I build this component myself, or buy it from Jita?"** -- recursively, for every material in the tree.
+
+## Tab Overview
+
+The Production page (`src/pages/Production.tsx`) provides a global item search bar and six tabs:
+
+| Tab | Icon | Requires Item | Component | Purpose |
+|-----|------|---------------|-----------|---------|
+| **Economics** | Chart | No | `EconomicsTab` | Market-wide profitability scanner |
+| **Calculator** | Gear | Yes | `CalculatorTab` | Blueprint simulation with BOM |
+| **Planner** | Chain | Yes | `PlannerTab` | Make-or-Buy decision tree |
+| **Reactions** | Atom | Yes | `ReactionsTab` | Reaction material chains |
+| **Invention** | Microscope | Yes | `InventionTab` | T2 invention calculator |
+| **PI** | Globe | No | `PITab` | Planetary Industry (3 sub-tabs) |
+
+Tabs marked "Requires Item" are disabled until a user selects an item from the search bar. The search uses `marketApi.searchItems()` with a 300ms debounce. Selecting an item stores its `typeID` in the URL as `?tab=calculator&typeId=24698`, enabling browser back/forward navigation.
+
+---
+
+## 1. Production Calculator Flow
+
+**Component:** `src/components/production/CalculatorTab.tsx`
+
+### Workflow
+
+```
+Search Item --> Select Blueprint --> Set ME/TE/Runs --> API Call --> See Results
+                                         |
+                                         v
+                              +---------------------+
+                              | Financial Summary    |
+                              |  Production Cost     |
+                              |  Sell Price (Jita)   |
+                              |  Profit & ROI        |
+                              +---------------------+
+                              | Production Time      |
+                              |  (TE-adjusted)       |
+                              +---------------------+
+                              | Bill of Materials    |
+                              |  Material | Qty | $  |
+                              |  --------+-----+--- |
+                              |  Tritanium| 500 | 2M |
+                              |  Pyerite  | 200 | 1M |
+                              |  ...      |     |    |
+                              |  TOTAL    |     | 8M |
+                              +---------------------+
+```
+
+### Controls
+
+| Control | Range | Default | Effect |
+|---------|-------|---------|--------|
+| **ME** (Material Efficiency) | 0--10 | 10 | Reduces material quantities |
+| **TE** (Time Efficiency) | 0--20 | 20 | Reduces production time |
+| **Runs** | 1--100 | 1 | Number of production runs |
+
+### Financial Summary Cards
+
+The simulator returns four key metrics displayed as stat cards:
+
+- **Production Cost** (red) -- Total material cost at Jita sell prices
+- **Sell Price** (green) -- Market sell price of the finished product
+- **Profit** (green/red) -- Sell Price minus Production Cost
+- **ROI** (cyan) -- Return on investment percentage
+
+### Bill of Materials
+
+Each BOM row shows the EVE item icon, material name (clickable to navigate to that item's calculator), quantity (ME-adjusted), unit price, and total cost. Material names are hyperlinked via `onNavigateToMaterial` -- clicking drills into that material's own blueprint.
+
+### Facility Comparison
+
+The "Compare Facilities" button triggers `productionApi.compare()` which evaluates the same job across five facility types:
+
+| Facility | Material Modifier | Time Modifier |
+|----------|-------------------|---------------|
+| NPC Station | 1.00 | 1.00 |
+| Raitaru | 0.99 | 0.85 |
+| Azbel | 0.98 | 0.80 |
+| Sotiyo | 0.97 | 0.75 |
+| Tatara (Reactions) | 0.98 | 0.75 |
+
+Each facility card shows material cost, install cost, total cost, and production time. The cheapest option receives a green "BEST" badge.
+
+### API Call
+
+```
+GET /api/production/simulate/{typeId}?runs=1&me=10&te=20
+```
+
+Response is transformed by `transformSimulation()` to map backend field names to the frontend `ProductionSimulation` interface.
+
+---
+
+## 2. Make-or-Buy Decision Tree (Planner)
+
+**Component:** `src/components/production/PlannerTab.tsx`
+
+This is the central decision-making tool of the Production Suite. It renders the full recursive material tree for any manufacturable item and lets the user toggle each sub-component between **BUILD** (manufacture it yourself) and **BUY** (purchase from market).
+
+### Core Workflow
+
+```
+                        +-------------------+
+                        |   Drake (BUILD)   |  <-- Root item, always BUILD
+                        +-------------------+
+                               |
+              +----------------+----------------+
+              |                |                |
+     +--------v-------+ +-----v------+ +-------v--------+
+     | Tritanium (BUY)| | MEG (BUILD)| | Graviton Pulse |
+     | raw material   | |  component | |   Gen. (BUY)   |
+     +----------------+ +-----+------+ +-------+--------+
+                               |                |
+                    +----------+------+    (tree stops --
+                    |                 |     buying this)
+             +------v-----+  +-------v-----+
+             | Morphite   |  | Isogen      |
+             | (BUY)      |  | (BUY)       |
+             +------------+  +-------------+
+```
+
+### Decision Logic
+
+Each node in the tree has one of three states:
+
+| Node Type | Badge | Color | Behavior |
+|-----------|-------|-------|----------|
+| **Root item** | `BUILD` (cyan) | `#00d4ff` | Always built, cannot be toggled |
+| **Manufacturable component** | `BUILD` / `BUY` toggle | Green / Yellow | Click toggles between build and buy |
+| **Raw material** | `BUY` (grey) | `#8b949e` | Non-manufacturable, always bought |
+
+When a manufacturable node is set to **BUY**:
+- Its name gets a strikethrough decoration (yellow)
+- Its subtree collapses (children hidden)
+- The component itself appears in the shopping list as a "COMP" (component) item
+- Its sub-materials are NOT included in the shopping list
+
+When a manufacturable node is set to **BUILD**:
+- Its subtree expands showing all required materials
+- Only the leaf raw materials appear in the shopping list as "RAW" items
+
+### Batch Controls
+
+| Button | Action |
+|--------|--------|
+| **Expand** | Expand all collapsible nodes |
+| **Collapse** | Collapse all collapsible nodes |
+| **Build All** | Set all sub-components to BUILD (deepest possible tree) |
+| **Buy All** | Set all sub-components to BUY (shallowest tree, buy everything) |
+
+### Shopping List
+
+The shopping list aggregates all materials that need to be purchased, based on the current make-or-buy decisions. Items are split into two categories:
+
+- **COMP** (component) -- Manufacturable items the user chose to BUY instead of BUILD
+- **RAW** -- Non-manufacturable base materials (minerals, moon goo, etc.)
+
+Each row shows: icon, name, type badge, quantity (scaled by runs), unit price (Jita sell), and total cost. Prices are fetched via `marketApi.getPricesBulk()`.
+
+The **Copy Multibuy** button copies the shopping list in EVE's multibuy format:
+
+```
+Tritanium 150000
+Pyerite 45000
+Megacyte 200
+```
+
+### Tree Rendering
+
+The tree is rendered recursively by `renderNode()`. Each depth level uses a distinct color from `DEPTH_COLORS`:
+
+| Depth | Color |
+|-------|-------|
+| 0 | `#00d4ff` (cyan) |
+| 1 | `#3fb950` (green) |
+| 2 | `#d29922` (yellow) |
+| 3 | `#a855f7` (purple) |
+| 4 | `#f85149` (red) |
+
+### API Call
+
+```
+GET /api/production/chains/{typeId}?format=tree
+```
+
+Returns a `MaterialChain` with a recursive `ChainNode` structure. Each `ChainNode` has:
+- `type_id`, `name`, `quantity`
+- `is_manufacturable` (boolean -- determines if BUILD/BUY toggle appears)
+- `children` (nested `ChainNode[]`)
+
+---
+
+## 3. Production Projects
+
+**Types:** `ProductionProject`, `ProjectItem`, `ProjectDetail` in `src/types/production.ts`
+
+Production Projects group multiple items into named manufacturing plans with persistent make-or-buy decisions.
+
+### Project Lifecycle
+
+```
+  DRAFT  ------>  ACTIVE  ------>  COMPLETE
+  (planning)     (building)       (done)
+```
+
+### Project Structure
+
+```
+Project: "Drake Fleet Build"
+  |
+  +-- Item: Drake (qty: 10, ME: 10, TE: 20, status: planned)
+  |     +-- Material decisions: Tritanium=BUY, MEG=BUILD, ...
+  |
+  +-- Item: Large Shield Extender II (qty: 30, ME: 10, TE: 20, status: pending)
+  |     +-- Material decisions: ...
+  |
+  +-- Aggregated Shopping List
+        +-- Tritanium: 1,500,000 (needed by: Drake, LSE II)
+        +-- Pyerite: 450,000 (needed by: Drake)
+        +-- ...
+        +-- Total: 2.3B ISK (Jita Sell)
+```
+
+### Key Features
+
+- **Per-item ME/TE levels**: Each item in the project can have its own material and time efficiency
+- **Persistent decisions**: Make-or-buy decisions are saved per project item via `projectApi.saveDecisions()`
+- **Aggregated shopping list**: `projectApi.getShoppingList()` merges all buy-decisions across items, showing which items need each material
+- **Copy Multibuy**: One-click copy of the aggregated shopping list for in-game use
+
+### API Endpoints
+
+| Method | Endpoint | Purpose |
+|--------|----------|---------|
+| `GET` | `/api/production/projects?character_id={id}` | List projects |
+| `POST` | `/api/production/projects` | Create project |
+| `GET` | `/api/production/projects/{id}` | Get project detail |
+| `PUT` | `/api/production/projects/{id}` | Update project |
+| `DELETE` | `/api/production/projects/{id}` | Delete project |
+| `POST` | `/api/production/projects/{id}/items` | Add item |
+| `PUT` | `/api/production/projects/{id}/items/{itemId}` | Update item (qty, ME, TE, status) |
+| `DELETE` | `/api/production/projects/{id}/items/{itemId}` | Remove item |
+| `GET` | `/api/production/projects/items/{itemId}/decisions` | Get material decisions |
+| `PUT` | `/api/production/projects/items/{itemId}/decisions` | Save material decisions |
+| `GET` | `/api/production/projects/{id}/shopping-list` | Aggregated shopping list |
+
+---
+
+## 4. PI Chain System
+
+**Component:** `src/components/production/PITab.tsx` with three sub-tabs.
+
+### Sub-Tab Overview
+
+| Sub-Tab | Component | Purpose |
+|---------|-----------|---------|
+| **Item-Analyse** | `PIItemAnalysis` (in PITab.tsx) | PI requirements for a selected manufactured item |
+| **Chain Planner** | `PIChainPlanner.tsx` | Plan PI production chains with My Plans + Chain Browser |
+| **Empire** | `PIEmpireOverview.tsx` | Multi-character empire analysis |
+
+### 4.1 Chain Browser (DAG Visualization)
+
+**Component:** `src/components/production/PIChainBrowser.tsx`
+
+The Chain Browser renders an interactive SVG directed acyclic graph (DAG) for any P4 product, showing the complete production chain from P0 raw resources up to P4 advanced commodities.
+
+```
+                    +------------------+
+                    |  P4: Nano-Factory |  <-- Top of graph
+                    +------------------+
+                    /         |         \
+           +-------+   +--------+   +--------+
+           | P3: A |   | P3: B  |   | P3: C  |
+           +-------+   +--------+   +--------+
+           /     \         |    \        ...
+      +-----+ +-----+ +-----+ +-----+
+      |P2: D| |P2: E| |P2: F| |P2: G|
+      +-----+ +-----+ +-----+ +-----+
+         |       |        |       |
+      +-----+ +-----+ +-----+ +-----+
+      |P1: H| |P1: I| |P1: J| |P1: K|
+      +-----+ +-----+ +-----+ +-----+
+         |       |        |       |
+      +-----+ +-----+ +-----+ +-----+
+      |P0: L| |P0: M| |P0: N| |P0: O|   <-- Raw resources
+      +-----+ +-----+ +-----+ +-----+
+```
+
+**Key features:**
+- **P4 Product Selector**: Button bar at top showing all 8 P4 products with profit/h
+- **SVG DAG**: Bezier curves connecting nodes, tier-based layout (P4 top, P0 bottom)
+- **Click-to-cart**: Click P1--P4 nodes to add to cart (green border + checkmark)
+- **BFS hover highlighting**: Hovering a node highlights its entire upstream/downstream chain, dimming unrelated nodes
+- **Profitability overlay**: Each node shows ISK/h and ROI% from `piApi.getOpportunities()`
+- **Cart panel**: Right sidebar with qty/h input per item, create plan button
+
+**Node Dimensions:** `NODE_W=130`, `NODE_H=50`, `H_GAP=16`, `V_GAP=48`
+
+**Tier Colors:**
+| Tier | Color |
+|------|-------|
+| P0 (Raw) | `#8b949e` |
+| P1 | `#3fb950` |
+| P2 | `#58a6ff` |
+| P3 | `#a855f7` |
+| P4 | `#d4a017` |
+
+### 4.2 Chain Planner
+
+**Component:** `src/components/production/PIChainPlanner.tsx`
+
+The Chain Planner manages PI production plans with two internal tabs:
+
+**My Plans** -- CRUD interface for PI plans:
+- Create named plans (e.g., "P4 Wetware Farm")
+- Status lifecycle: `planning` -> `active` -> `paused` -> `completed`
+- Plan cards showing node count, target count, assignment progress
+- Status filter buttons (All, Planning, Active, Paused, Completed)
+
+**Plan Detail** -- Full DAG visualization of a plan with:
+- Add targets via PI product search
+- Target chips showing product, tier, and qty/h
+- Interactive SVG DAG with status indicators per node (ok/warning/critical/unassigned)
+- Node assignment panel: select character + planet, save assignment
+- **IST/SOLL Status Table**: Compares planned (SOLL) vs actual (IST) production rates per node, with delta percentages and status badges
+
+**Characters:** Artallus (526379435), Cytricia (110592475)
+
+### 4.3 Empire Overview
+
+**Component:** `src/components/production/PIEmpireOverview.tsx`
+
+The Empire Overview analyzes what multiple characters produce together and which P4 products are feasible.
+
+**Layout:** Two-column grid -- SVG DAG (left) + Empire Sidebar (right)
+
+**P4 Feasibility Scoring:**
+
+Each P4 product gets a feasibility percentage based on how many of its required inputs are already being produced by the characters:
+
+```
+Feasibility = (inputs_available / inputs_total) * 100%
+```
+
+| Score | Color | Meaning |
+|-------|-------|---------|
+| >= 75% | Green | Most inputs covered |
+| >= 50% | Yellow | Partial coverage |
+| >= 25% | Gold | Minority of inputs available |
+| < 25% | Red | Missing most inputs |
+
+**DAG Node Status:**
+
+| Status | Color | Indicator | Meaning |
+|--------|-------|-----------|---------|
+| Available | `#3fb950` | Solid dot | Produced by extractors |
+| Factory | `#58a6ff` | Solid dot | Produced by factories |
+| Missing | `#f85149` | Dashed border | Not produced at all |
+
+**Sidebar sections:**
+- Empire Status: total colonies, extractors, factories across all characters
+- Per-character breakdown (colonies, extractors, factories)
+- Selected P4 detail: Jita sell price, input cost, missing buy cost
+- Available inputs list (green dots, with qty/h)
+- Missing inputs list (red dots, with market price)
+- Profit/h and ROI estimate
+
+**API Call:**
+```
+GET /api/pi/empire/analysis?character_ids=110592475,526379435
+```
+
+---
+
+## 5. Invention & Reactions
+
+### 5.1 T2 Invention Calculator
+
+**Component:** `src/components/production/InventionTab.tsx`
+
+Calculates invention costs and success probability for T2 items across all decryptor options.
+
+**Workflow:**
+```
+Select T2 Item --> Fetch Decryptor Comparison --> See Best Option
+                          |
+                          v
+                   +---------------------------------+
+                   | LOWEST COST/RUN: Optimized      |
+                   | Attainment Decryptor -- 12M/run |
+                   +---------------------------------+
+                   | Decryptor | ME | TE | Runs | Prob | Inv.Cost | Cost/Run |
+                   |-----------|----|----|------|------|----------|----------|
+                   | None      |  2 |  4 |    1 | 34%  |   8.2M   |  24.1M   |
+                   | Optimized |  3 |  6 |    2 | 41%  |  12.1M   |  12.0M   |
+                   | ...       |    |    |      |      |          |          |
+                   +---------------------------------+
+```
+
+**Decryptor comparison table columns:** Decryptor name, result ME, result TE, output runs, probability, invention cost, total cost per run. The best option (lowest cost/run) gets a green highlight and "BEST" label.
+
+**Detail view** (click a decryptor card):
+- Invention probability: base -> adjusted (with skills/decryptor)
+- Invention inputs: datacores and their market prices
+- T2 materials: full BOM for the resulting T2 BPC
+
+**Probability color coding:**
+| Probability | Color |
+|-------------|-------|
+| > 30% | Green |
+| 20--30% | Yellow |
+| < 20% | Red |
+
+**API Calls:**
+```
+GET /api/production/invention/{typeId}/decryptors
+GET /api/production/invention/{typeId}?decryptor_type_id={id}
+```
+
+### 5.2 Reaction Chains
+
+**Component:** `src/components/production/ReactionsTab.tsx`
+
+Shows all reaction materials required to manufacture an item, with expandable chain trees.
+
+**Layout:**
+```
++----------------------------------------------+
+| Reaction Materials for Drake                  |
+| 12% of production cost     Total: 45M ISK    |
++----------------------------------------------+
+| [icon] Composite | Fullerides       x500 | 2M |
+|    +-- Composite reaction chain (expandable)  |
+|        +-- Carbon Polymers  x200 (5 runs)     |
+|            +-- Moon | Hydrocarbons  x400      |
+|            +-- Moon | Silicates     x400      |
++----------------------------------------------+
+| Raw Moon Materials                            |
+| Hydrocarbons          800                     |
+| Silicates             400                     |
++----------------------------------------------+
+```
+
+**Reaction categories** with color coding:
+| Category | Color |
+|----------|-------|
+| Composite | `#ff8800` |
+| Simple | `#3fb950` |
+| Polymer | `#00d4ff` |
+| Biochemical | `#a855f7` |
+
+Each material row is expandable to show its full reaction chain tree. The tree uses Unicode box-drawing characters for structure.
+
+**API Call:**
+```
+GET /api/production/reaction-requirements/{typeId}
+```
+
+---
+
+## 6. Economics Analysis
+
+**Component:** `src/components/production/EconomicsTab.tsx`
+
+The Economics tab does **not** require an item selection. It scans the entire market for profitable manufacturing opportunities.
+
+### Filter Bar
+
+| Filter | Default | Purpose |
+|--------|---------|---------|
+| Min ROI % | 5 | Minimum return on investment |
+| Max ROI % | 300 | Maximum ROI (filters out suspicious outliers) |
+| Min Profit ISK | 1,000,000 | Minimum profit per unit |
+| Min Daily Vol | 10 | Minimum daily trade volume (liquidity) |
+| Limit | 50 | Max results (25, 50, or 100) |
+
+### Results Table
+
+Sortable table with columns:
+
+| Column | Sortable | Color |
+|--------|----------|-------|
+| Item (icon + name) | Yes | Cyan (clickable) |
+| Production Cost | Yes | Red |
+| Sell Price | Yes | Green |
+| Profit/Unit | Yes | Green |
+| ROI % | Yes | Green (&gt;30%), Yellow (10--30%), Grey (&lt;10%) |
+| Daily Volume | Yes | Default |
+
+Clicking an item name navigates to the Calculator tab for that item.
+
+**API Call:**
+```
+GET /api/production/economics/opportunities?min_roi=5&min_profit=1000000&min_volume=10&limit=50
+```
+
+---
+
+## 7. API Endpoints Reference
+
+### Production Core
+
+| Method | Endpoint | Purpose |
+|--------|----------|---------|
+| `GET` | `/api/production/simulate/{typeId}` | Blueprint simulation (ME/TE/runs) |
+| `POST` | `/api/production/simulate` | Blueprint simulation (POST variant) |
+| `GET` | `/api/production/profit-check/{typeId}` | Quick profit check |
+| `GET` | `/api/production/chains/{typeId}` | Material chain tree |
+| `GET` | `/api/production/chains/{typeId}/materials` | Flat materials list |
+| `POST` | `/api/production/compare` | Facility comparison (NPC, Raitaru, Azbel, Sotiyo, Tatara) |
+
+### Economics
+
+| Method | Endpoint | Purpose |
+|--------|----------|---------|
+| `GET` | `/api/production/economics/opportunities` | Profitable manufacturing opportunities |
+| `GET` | `/api/production/economics/{typeId}` | Single item economics detail |
+| `GET` | `/api/production/economics/{typeId}/regions` | Regional economics comparison |
+
+### Invention
+
+| Method | Endpoint | Purpose |
+|--------|----------|---------|
+| `GET` | `/api/production/invention/{typeId}` | Invention detail (with optional decryptor) |
+| `GET` | `/api/production/invention/{typeId}/decryptors` | Decryptor comparison matrix |
+
+### Reactions
+
+| Method | Endpoint | Purpose |
+|--------|----------|---------|
+| `GET` | `/api/reactions` | All reaction formulas |
+| `GET` | `/api/reactions/search?q={query}` | Search reactions |
+| `GET` | `/api/reactions/{id}` | Single reaction detail |
+| `GET` | `/api/reactions/{id}/profit` | Reaction profitability |
+| `GET` | `/api/reactions/profitable` | Profitable reactions list |
+| `GET` | `/api/production/reaction-requirements/{typeId}` | Reaction materials for an item |
+
+### Planetary Industry
+
+| Method | Endpoint | Purpose |
+|--------|----------|---------|
+| `GET` | `/api/pi/formulas` | All PI schematics (P1--P4) |
+| `GET` | `/api/pi/formulas/search?q={query}` | Search PI products |
+| `GET` | `/api/pi/opportunities` | PI profitability opportunities |
+| `GET` | `/api/pi/profitability/{typeId}` | Single product profitability |
+| `GET` | `/api/pi/characters/{id}/summary` | Character PI summary |
+| `GET` | `/api/pi/characters/{id}/colonies/{planetId}/graph` | Colony pin graph |
+| `GET` | `/api/pi/advisor/{characterId}` | PI advisor recommendations |
+| `GET` | `/api/pi/planets/recommend` | Planet recommendations |
+| `GET` | `/api/production/pi-requirements/{typeId}` | PI materials for a manufactured item |
+| `GET` | `/api/pi/empire/analysis?character_ids=...` | Multi-character empire analysis |
+
+### PI Chain Planner
+
+| Method | Endpoint | Purpose |
+|--------|----------|---------|
+| `POST` | `/api/pi/plans` | Create plan |
+| `GET` | `/api/pi/plans` | List plans (optional status filter) |
+| `GET` | `/api/pi/plans/{id}` | Get plan detail (nodes + edges) |
+| `DELETE` | `/api/pi/plans/{id}` | Delete plan |
+| `PATCH` | `/api/pi/plans/{id}/status` | Update plan status |
+| `POST` | `/api/pi/plans/{id}/targets` | Add production target |
+| `DELETE` | `/api/pi/plans/{id}/targets/{typeId}` | Remove target |
+| `PATCH` | `/api/pi/plans/{id}/nodes/{nodeId}/assign` | Assign character + planet |
+| `GET` | `/api/pi/plans/{id}/status-check` | IST/SOLL status check |
+
+### Production Projects
+
+| Method | Endpoint | Purpose |
+|--------|----------|---------|
+| `GET` | `/api/production/projects?character_id={id}` | List projects |
+| `POST` | `/api/production/projects` | Create project |
+| `GET` | `/api/production/projects/{id}` | Get project detail |
+| `PUT` | `/api/production/projects/{id}` | Update project |
+| `DELETE` | `/api/production/projects/{id}` | Delete project |
+| `POST` | `/api/production/projects/{id}/items` | Add item |
+| `PUT` | `/api/production/projects/{id}/items/{itemId}` | Update item |
+| `DELETE` | `/api/production/projects/{id}/items/{itemId}` | Remove item |
+| `GET` | `/api/production/projects/items/{itemId}/decisions` | Get material decisions |
+| `PUT` | `/api/production/projects/items/{itemId}/decisions` | Save material decisions |
+| `GET` | `/api/production/projects/{id}/shopping-list` | Aggregated shopping list |
+
+---
+
+## 8. TypeScript Interfaces
+
+Key interfaces from `src/types/production.ts`:
+
+### Core Production
+
+```ts
+interface ProductionSimulation {
+  type_id: number;
+  type_name: string;
+  runs: number;
+  me: number;
+  te: number;
+  bom: BOMItem[];
+  financial_analysis: FinancialAnalysis;
+  production_time: ProductionTime;
+  shopping_list: BOMItem[];
+  warnings: string[];
+}
+
+interface ChainNode {
+  type_id: number;
+  name: string;
+  quantity: number;
+  is_manufacturable: boolean;
+  children: ChainNode[];
+}
+```
+
+### Projects
+
+```ts
+interface ProductionProject {
+  id: number;
+  creator_character_id: number;
+  corporation_id: number | null;
+  name: string;
+  description: string;
+  status: 'draft' | 'active' | 'complete';
+  item_count: number;
+}
+
+interface ProjectMaterialDecision {
+  material_type_id: number;
+  decision: 'buy' | 'make';
+  quantity: number;
+}
+```
+
+### Facility Presets
+
+```ts
+const FACILITY_PRESETS = [
+  { id: 'npc',     name: 'NPC Station',         material: 1.00, time: 1.00 },
+  { id: 'raitaru', name: 'Raitaru',             material: 0.99, time: 0.85 },
+  { id: 'azbel',   name: 'Azbel',              material: 0.98, time: 0.80 },
+  { id: 'sotiyo',  name: 'Sotiyo',             material: 0.97, time: 0.75 },
+  { id: 'tatara',  name: 'Tatara (Reactions)',  material: 0.98, time: 0.75 },
+];
+```
+
+---
+
+## 9. File Map
+
+| File | Purpose |
+|------|---------|
+| `src/pages/Production.tsx` | Main page: search bar, tab navigation, item header |
+| `src/components/production/CalculatorTab.tsx` | Blueprint calculator with BOM and facility comparison |
+| `src/components/production/PlannerTab.tsx` | Make-or-Buy decision tree with shopping list |
+| `src/components/production/EconomicsTab.tsx` | Market-wide profitability scanner |
+| `src/components/production/InventionTab.tsx` | T2 invention calculator with decryptor comparison |
+| `src/components/production/ReactionsTab.tsx` | Reaction chain visualization |
+| `src/components/production/PITab.tsx` | PI router (3 sub-tabs) + Item-Analyse |
+| `src/components/production/PIChainBrowser.tsx` | Interactive SVG DAG for PI chains |
+| `src/components/production/PIChainPlanner.tsx` | PI plan management + Chain Browser integration |
+| `src/components/production/PIEmpireOverview.tsx` | Multi-character P4 feasibility analysis |
+| `src/components/production/PIProductionChainViz.tsx` | PI production chain SVG visualization |
+| `src/types/production.ts` | All TypeScript interfaces (40+ types) |
+| `src/services/api/production.ts` | API client (productionApi, economicsApi, inventionApi, reactionsApi, piApi, projectApi) |

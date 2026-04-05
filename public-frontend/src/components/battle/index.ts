@@ -1,0 +1,11 @@
+export { BattleHeader } from './BattleHeader';
+export { BattleSidesPanel } from './BattleSidesPanel';
+export { BattleKillFeed } from './BattleKillFeed';
+export { BattleCommanderIntel } from './BattleCommanderIntel';
+export { BattleShipClasses } from './BattleShipClasses';
+export { BattleDoctrines } from './BattleDoctrines';
+export { BattleDamageAnalysis } from './BattleDamageAnalysis';
+export { BattleContext } from './BattleContext';
+export { BattleSovContext } from './BattleSovContext';
+export { BattleVictimTank } from './BattleVictimTank';
+export { BattleAttackerLoadouts } from './BattleAttackerLoadouts';

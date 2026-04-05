@@ -1,0 +1,131 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta http-equiv="refresh" content="10">
+  <title>EVE Intelligence - Waiting Room</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      background: linear-gradient(135deg, #0a0a0f 0%, #1a1a2e 100%);
+      color: #e0e0e0;
+      min-height: 100vh;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+    .container {
+      text-align: center;
+      padding: 2rem;
+      max-width: 500px;
+    }
+    h1 {
+      font-size: 2.5rem;
+      margin-bottom: 0.5rem;
+      color: #58a6ff;
+    }
+    .subtitle {
+      color: #8b949e;
+      margin-bottom: 2rem;
+    }
+    .status-box {
+      background: rgba(255,255,255,0.05);
+      border: 1px solid rgba(88,166,255,0.3);
+      border-radius: 12px;
+      padding: 2rem;
+      margin: 2rem 0;
+    }
+    .spinner {
+      width: 50px;
+      height: 50px;
+      border: 3px solid rgba(88,166,255,0.3);
+      border-top-color: #58a6ff;
+      border-radius: 50%;
+      animation: spin 1s linear infinite;
+      margin: 0 auto 1.5rem;
+    }
+    @keyframes spin { to { transform: rotate(360deg); } }
+    .status {
+      font-size: 1.2rem;
+      color: #58a6ff;
+      margin-bottom: 0.5rem;
+    }
+    .message {
+      color: #8b949e;
+      line-height: 1.6;
+    }
+    .queue-animation {
+      display: flex;
+      justify-content: center;
+      gap: 8px;
+      margin: 1.5rem 0;
+    }
+    .queue-dot {
+      width: 12px;
+      height: 12px;
+      background: #58a6ff;
+      border-radius: 50%;
+      animation: pulse 1.5s ease-in-out infinite;
+    }
+    .queue-dot:nth-child(2) { animation-delay: 0.2s; }
+    .queue-dot:nth-child(3) { animation-delay: 0.4s; }
+    .queue-dot:nth-child(4) { animation-delay: 0.6s; }
+    .queue-dot:nth-child(5) { animation-delay: 0.8s; }
+    @keyframes pulse {
+      0%, 100% { opacity: 0.3; transform: scale(0.8); }
+      50% { opacity: 1; transform: scale(1.2); }
+    }
+    .refresh-note {
+      margin-top: 2rem;
+      font-size: 0.85rem;
+      color: #6e7681;
+    }
+    .eve-icon {
+      font-size: 3rem;
+      margin-bottom: 1rem;
+    }
+    .tip {
+      margin-top: 1.5rem;
+      padding: 1rem;
+      background: rgba(88,166,255,0.1);
+      border-radius: 8px;
+      font-size: 0.9rem;
+      color: #8b949e;
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <div class="eve-icon">⚔️</div>
+    <h1>EVE Intelligence</h1>
+    <p class="subtitle">Real-time Combat Intelligence for New Eden</p>
+
+    <div class="status-box">
+      <div class="spinner"></div>
+      <div class="status">High Demand - You're in the Queue</div>
+      <div class="queue-animation">
+        <div class="queue-dot"></div>
+        <div class="queue-dot"></div>
+        <div class="queue-dot"></div>
+        <div class="queue-dot"></div>
+        <div class="queue-dot"></div>
+      </div>
+      <p class="message">
+        New Eden is busy right now.<br>
+        You'll be let in automatically when a slot opens.
+      </p>
+    </div>
+
+    <div class="tip">
+      <strong>Tip:</strong> Bookmark this page - intel waits for no one.
+    </div>
+
+    <p class="refresh-note">
+      Auto-refresh every 10 seconds.<br>
+      Keep this tab open - you'll get in soon.
+    </p>
+  </div>
+</body>
+</html>

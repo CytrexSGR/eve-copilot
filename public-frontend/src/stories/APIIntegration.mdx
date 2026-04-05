@@ -1,0 +1,123 @@
+import { Meta } from '@storybook/addon-docs/blocks';
+
+<Meta title="Docs/API Integration" />
+
+# API Integration
+
+## Service Layer
+
+All API communication is centralized in `src/services/api/`. Each module exports typed functions that wrap Axios calls to a specific backend microservice. The API base URL uses relative paths (`/api/...`) which are proxied to the appropriate backend service via Vite dev server or nginx in production.
+
+## TanStack React Query Configuration
+
+API data is fetched and cached via TanStack React Query v5, configured in `src/lib/queryClient.ts`:
+
+| Option | Value | Behavior |
+|--------|-------|----------|
+| `staleTime` | 60 seconds | Cached data is considered fresh for 60s; no re-fetch during this window |
+| `gcTime` | 5 minutes | Unused cache entries are garbage-collected after 5 minutes |
+| `retry` | 2 | Failed requests are retried twice before reporting an error |
+| `refetchOnWindowFocus` | DEV only | Re-fetches stale data on tab focus in development, disabled in production |
+| `refetchOnMount` | true | Always re-fetches on component mount if data is stale |
+
+Components use `useQuery()` and `useMutation()` hooks for data operations, ensuring automatic caching, deduplication, and background refresh.
+
+## API Modules
+
+The following 21 API modules are defined in `src/services/api/`:
+
+### Authentication & Authorization
+
+| Module | File | Base Path | Description |
+|--------|------|-----------|-------------|
+| **auth** | `auth.ts` | `/api/auth`, `/api/tier`, `/api/settings` | EVE SSO login/logout, account info, tier resolution, module access |
+
+### Intelligence & Warfare
+
+| Module | File | Base Path | Description |
+|--------|------|-----------|-------------|
+| **battles** | `battles.ts` | `/api/war` | Battle reports, battle detail, attacker loadouts, tank analysis |
+| **reports** | `reports.ts` | `/api/reports`, `/api/intelligence` | PowerBloc listing, alliance/corp intel, offensive/defensive stats |
+| **powerbloc** | `powerbloc.ts` | `/api/powerbloc` | Coalition-level intel (geography, capsuleers, capitals, hunting) |
+| **military** | `military.ts` | `/api/fleet`, `/api/intel` | D-Scan parsing, local scan, fleet PAPs |
+| **fleet** | `fleet.ts` | `/api/fleet` | Fleet management and tracking |
+| **timers** | `timers.ts` | `/api/timers` | Structure timer board |
+| **fingerprints** | `fingerprints.ts` | `/api/fingerprints` | Pilot fingerprint analysis |
+
+### Market & Economy
+
+| Module | File | Base Path | Description |
+|--------|------|-----------|-------------|
+| **market** | `market.ts` | `/api/market`, `/api/trading`, `/api/hunter`, `/api/alerts` | Market data, trading tools, arbitrage hunter, price alerts |
+| **economy** | `economy.ts` | `/api/war` | War economy analysis, trade routes |
+
+### Production & Industry
+
+| Module | File | Base Path | Description |
+|--------|------|-----------|-------------|
+| **production** | `production.ts` | `/api/production`, `/api/pi`, `/api/mining`, `/api/reactions` | Manufacturing, PI, mining, reactions, project management |
+
+### Ship Fittings
+
+| Module | File | Base Path | Description |
+|--------|------|-----------|-------------|
+| **fittings** | `fittings.ts` | `/api/fittings`, `/api/sde` | Fitting browser, editor, stats, SDE data, EFT import/export |
+
+### Character Management
+
+| Module | File | Base Path | Description |
+|--------|------|-----------|-------------|
+| **character** | `character.ts` | `/api/character`, `/api/skills`, `/api/mastery` | Character data, assets, skills, skill queue, industry jobs |
+
+### Corporation Management
+
+| Module | File | Base Path | Description |
+|--------|------|-----------|-------------|
+| **corptools** | `corptools.ts` | `/api/corp-contracts`, `/api/sovereignty`, `/api/moon` | Corp contracts, sovereignty, moon mining |
+| **finance** | `finance.ts` | `/api/finance` | Corporation wallets, mining tax, invoicing |
+| **hr** | `hr.ts` | `/api/hr` | HR vetting, red lists, applications |
+| **srp** | `srp.ts` | `/api/finance` | Ship Replacement Program claims |
+
+### Navigation & Logistics
+
+| Module | File | Base Path | Description |
+|--------|------|-----------|-------------|
+| **navigation** | `navigation.ts` | `/api/route`, `/api/jump` | Route planning, jump calculations |
+| **shopping** | `shopping.ts` | `/api/shopping` | Shopping list aggregation, freight pricing |
+| **wormhole** | `wormhole.ts` | `/api/wormhole` | Wormhole connections, Thera routes |
+
+### Barrel Export
+
+All modules are re-exported from `src/services/api/index.ts` for convenient imports.
+
+## Backend Microservices
+
+The API modules map to 18 backend microservices:
+
+| Service | Port | Handles |
+|---------|------|---------|
+| api-gateway | 8000 | Top-level routing, feedback, dashboard |
+| war-intel | 8002 | Intelligence, battles, PowerBlocs, fingerprints, DPS, sovereignty |
+| scheduler | 8003 | Background job scheduling |
+| market | 8004 | Market data, trading, alerts, arbitrage, route calculations |
+| production | 8005 | Manufacturing, PI, reactions, mining, supply chain |
+| shopping | 8006 | Shopping lists, freight |
+| character | 8007 | Character data, fittings, SDE, skills, mastery |
+| auth | 8010 | EVE SSO, accounts, tiers, subscriptions |
+| ectmap | 8011 | Interactive star map (Next.js) |
+| wormhole | 8012 | Wormhole data, Thera connections |
+| zkillboard | 8013 | Kill stream ingestion (background) |
+| dotlan | 8014 | DOTLAN data scraping (activity, ADM, sovereignty) |
+| hr | 8015 | Human resources, vetting, applications |
+| finance | 8016 | Corporation finance, wallets, SRP, buyback |
+
+## Typical Data Flow
+
+```
+Component
+  -> useQuery({ queryKey, queryFn: () => apiModule.getData() })
+    -> Axios GET /api/domain/endpoint
+      -> Vite proxy (dev) or nginx (prod)
+        -> Backend microservice
+          -> PostgreSQL / Redis / ESI
+```

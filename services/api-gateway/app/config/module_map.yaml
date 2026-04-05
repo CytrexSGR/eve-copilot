@@ -1,0 +1,140 @@
+# Module-based endpoint gating
+# Checked BEFORE tier_map.yaml -- first match wins
+# "free" = no module needed (publicly accessible data)
+#
+# Pattern matching:
+#   - Exact: /api/foo matches only /api/foo
+#   - Trailing wildcard: /api/foo/* matches /api/foo/bar and /api/foo/bar/baz
+#   - Mid-path wildcard: /api/foo/*/bar matches /api/foo/123/bar
+#   - Combined: /api/foo/*/bar/* matches /api/foo/123/bar/baz
+
+free:
+  # Public data -- always accessible
+  - "/api/war/battles"
+  - "/api/war/battles/active"
+  - "/api/war/battle/*/sides"
+  - "/api/war/battle/*/kills"
+  - "/api/intelligence/fast/*/summary"
+  - "/api/intelligence/fast/*/header"
+  - "/api/intelligence/fast/*/overview"
+  - "/api/market/prices/*"
+  - "/api/items/*"
+  - "/api/sde/*"
+  - "/api/dotlan/*"
+  - "/api/sovereignty/*"
+  - "/api/wormhole/types"
+  - "/api/wormhole/types/*"
+
+warfare_intel:
+  - "/api/war/battle/*/participants"
+  - "/api/war/battle/*/timeline"
+  - "/api/war/battle/*/ship-classes"
+  - "/api/war/battle/*/reshipments"
+  - "/api/war/battle/*/commander-intel"
+  - "/api/war/battle/*/damage-analysis"
+
+war_economy:
+  - "/api/war/economy/*"
+
+wormhole_intel:
+  - "/api/wormhole/activity"
+  - "/api/wormhole/evictions"
+  - "/api/wormhole/market/*"
+  - "/api/wormhole/opportunities"
+  - "/api/wormhole/residents"
+  - "/api/wormhole/stats/*"
+
+doctrine_intel:
+  - "/api/war/economy/doctrines"
+  - "/api/war/economy/doctrines/*"
+  - "/api/intelligence/*/doctrines"
+
+battle_analysis:
+  - "/api/war/battle/*/attacker-loadouts"
+  - "/api/war/battle/*/strategic-context"
+  - "/api/war/battle/*/victim-tank-analysis"
+  - "/api/dogma/*"
+
+character_suite:
+  - "/api/character/*/skills"
+  - "/api/character/*/skillqueue"
+  - "/api/character/*/assets"
+  - "/api/character/*/assets/*"
+  - "/api/character/*/industry"
+  - "/api/character/*/blueprints"
+  - "/api/character/*/orders"
+  - "/api/character/*/orders/*"
+  - "/api/character/*/attributes"
+  - "/api/character/*/implants"
+  - "/api/fittings/*"
+  - "/api/skills/*"
+  - "/api/research/*"
+
+market_analysis:
+  - "/api/market/arbitrage"
+  - "/api/market/trading-opportunities"
+  - "/api/market/trading-opportunities/*"
+  - "/api/market/hunting"
+  - "/api/market/portfolio"
+  - "/api/market/history"
+  - "/api/market/alerts"
+
+production_suite:
+  - "/api/production/*"
+  - "/api/reactions/*"
+  - "/api/pi/*"
+  - "/api/mining/*"
+  - "/api/supply-chain/*"
+
+corp_intel:
+  - "/api/intelligence/fast/*/offensive-stats"
+  - "/api/intelligence/fast/*/defensive-stats"
+  - "/api/intelligence/fast/*/capitals"
+  - "/api/intelligence/fast/*/geography"
+  - "/api/intelligence/fast/*/hunting"
+  - "/api/intelligence/fast/*/timeline"
+  - "/api/intelligence/fast/*/pilots"
+  - "/api/intelligence/fast/*/capsuleers"
+  - "/api/intelligence/fast/*/wormhole"
+  - "/api/intelligence/fast/*/combat-analysis"
+
+alliance_intel:
+  - "/api/intelligence/fast/*/complete"
+  - "/api/intelligence/fast/*/dashboard"
+  - "/api/intelligence/fast/*/alliance-corps"
+  - "/api/intelligence/fast/*/economics"
+  - "/api/intelligence/fast/*/insights"
+
+powerbloc_intel:
+  - "/api/powerbloc/*/offensive-stats"
+  - "/api/powerbloc/*/defensive-stats"
+  - "/api/powerbloc/*/capitals"
+  - "/api/powerbloc/*/hunting"
+  - "/api/powerbloc/*/details"
+  - "/api/powerbloc/*/wormhole"
+  - "/api/powerbloc/*/geography"
+  - "/api/powerbloc/*/capsuleers"
+  - "/api/powerbloc/*/pilot-intel"
+  - "/api/powerbloc/*/alliances-ranking"
+  - "/api/powerbloc/*/alliances-trends"
+  - "/api/powerbloc/*/alliances-ships"
+  - "/api/powerbloc/*/alliances-regions"
+  - "/api/powerbloc/*/victim-tank-profile"
+
+corp_mgmt:
+  - "/api/hr/*"
+  - "/api/finance/*"
+  - "/api/military/*"
+  - "/api/fleet/*"
+  - "/api/timers/*"
+  - "/api/contracts/*"
+  - "/api/corp-contracts/*"
+  - "/api/events/*"
+  - "/api/notifications/*"
+
+alliance_mgmt:
+  - "/api/sov/*"
+  - "/api/moon/*"
+  - "/api/fuel/*"
+  - "/api/fingerprints/*"
+  - "/api/mcp/*"

@@ -1,0 +1,64 @@
+import { Meta } from '@storybook/addon-docs/blocks';
+
+<Meta title="Docs/Welcome" />
+
+# Infinimind Intelligence -- Storybook
+
+Welcome to the component library for **Infinimind Intelligence**, an EVE Online real-time intelligence SaaS platform.
+
+## Tech Stack
+
+| Layer | Technology |
+|-------|-----------|
+| Framework | React 19 with TypeScript 5.9 |
+| Build | Vite 7 with esbuild minification |
+| Data | TanStack React Query v5 + Axios |
+| Routing | React Router DOM v7 |
+| Charts | Chart.js + react-chartjs-2 |
+| Icons | Lucide React |
+| Storybook | 10.x with Vitest integration |
+
+## Project Scale
+
+- **54 pages** across 10+ domains (intelligence, market, production, fittings, corp management, etc.)
+- **21 API service modules** in `src/services/api/`
+- **18 backend microservices** powering the data layer
+- Component directories spanning alliance, battle, corporation, fittings, market, production, navigation, wormhole, and more
+
+## Sidebar Navigation
+
+The Storybook sidebar is organized as follows:
+
+| Section | Content |
+|---------|---------|
+| **Docs/** | Architecture documentation (this page, routing, API, auth, feature gates) |
+| **Shared/** | Reusable UI primitives (Card, StatBox, RefreshIndicator, Sparkline, etc.) |
+| **Gates/** | Access control components (TierGate, ModuleGate) |
+| **Domain/** | Domain-specific components grouped by feature area |
+
+## Storybook Toolbar Controls
+
+### Tier Selector
+
+Use the **Tier** toolbar dropdown to simulate different subscription levels:
+
+- `free` -- Default, limited feature access
+- `pilot` -- Individual pilot subscription
+- `corporation` -- Corp-wide access
+- `alliance` -- Alliance-level features
+- `coalition` -- Full platform access
+
+### Auth Toggle
+
+The **Auth** toolbar toggle controls whether the `AuthContext` reports a logged-in user. This affects:
+
+- Whether `RequireAuth` gates pass or block
+- How `useModules()` resolves module access (unauthenticated users bypass gating)
+- The shape of `AuthContext` (account, tierInfo, activeModules)
+
+## Getting Started
+
+1. Browse **Docs/** pages for architecture context
+2. Explore **Shared/** components to understand the design system
+3. Check **Gates/** to see how TierGate and ModuleGate control feature visibility
+4. Use the Tier and Auth toolbar controls to test different access scenarios

@@ -1,0 +1,114 @@
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+  external_labels:
+    cluster: 'eve-copilot'
+    environment: 'production'
+
+# Alertmanager integration
+alerting:
+  alertmanagers:
+    - static_configs:
+        - targets: ['alertmanager:9093']
+
+# Recording and alerting rules
+rule_files:
+  - /etc/prometheus/recording_rules.yml
+  - /etc/prometheus/alert_rules.yml
+
+scrape_configs:
+  # API Gateway
+  - job_name: 'api-gateway'
+    static_configs:
+      - targets: ['api-gateway:8000']
+        labels:
+          service: 'api-gateway'
+          tier: 'gateway'
+
+  # War Intelligence Service
+  - job_name: 'war-intel-service'
+    static_configs:
+      - targets: ['war-intel-service:8000']
+        labels:
+          service: 'war-intel'
+          tier: 'backend'
+
+  # Scheduler Service
+  - job_name: 'scheduler-service'
+    static_configs:
+      - targets: ['scheduler-service:8000']
+        labels:
+          service: 'scheduler'
+          tier: 'jobs'
+
+  # Market Service
+  - job_name: 'market-service'
+    static_configs:
+      - targets: ['market-service:8000']
+        labels:
+          service: 'market'
+          tier: 'backend'
+
+  # Production Service
+  - job_name: 'production-service'
+    static_configs:
+      - targets: ['production-service:8000']
+        labels:
+          service: 'production'
+          tier: 'backend'
+
+  # Shopping Service
+  - job_name: 'shopping-service'
+    static_configs:
+      - targets: ['shopping-service:8000']
+        labels:
+          service: 'shopping'
+          tier: 'backend'
+
+  # Character Service
+  - job_name: 'character-service'
+    static_configs:
+      - targets: ['character-service:8000']
+        labels:
+          service: 'character'
+          tier: 'backend'
+
+  # MCP Service
+  - job_name: 'mcp-service'
+    static_configs:
+      - targets: ['mcp-service:8008']
+        labels:
+          service: 'mcp'
+          tier: 'ai-tools'
+
+  # Auth Service
+  - job_name: 'auth-service'
+    static_configs:
+      - targets: ['auth-service:8000']
+        labels:
+          service: 'auth'
+          tier: 'backend'
+
+  # Wormhole Service
+  - job_name: 'wormhole-service'
+    static_configs:
+      - targets: ['wormhole-service:8000']
+        labels:
+          service: 'wormhole'
+          tier: 'backend'
+
+  # zkillboard Service
+  - job_name: 'zkillboard-service'
+    static_configs:
+      - targets: ['zkillboard-service:8000']
+        labels:
+          service: 'zkillboard'
+          tier: 'stream'
+
+  # Prometheus self-monitoring
+  - job_name: 'prometheus'
+    static_configs:
+      - targets: ['localhost:9090']
+        labels:
+          service: 'prometheus'
+          tier: 'monitoring'

@@ -1,0 +1,123 @@
+import { Meta } from '@storybook/addon-docs/blocks';
+
+<Meta title="Docs/Authentication" />
+
+# Authentication
+
+## EVE SSO Flow
+
+Infinimind Intelligence uses **EVE Online Single Sign-On (SSO)** for authentication. The flow is:
+
+1. User clicks "Login with EVE Online" on the landing page
+2. `AuthContext.login()` calls `authApi.getLoginUrl(callbackUrl)` to get the EVE SSO authorization URL
+3. Browser redirects to `https://login.eveonline.com/v2/oauth/authorize` with the app's client ID
+4. User authenticates with CCP and grants ESI scopes
+5. CCP redirects to `/auth/callback` with an authorization code
+6. `AuthCallback` page sends the code to the backend auth-service
+7. Backend exchanges code for access + refresh tokens, creates/updates the platform account
+8. Frontend sets `localStorage.eve_auth` flag and redirects to `/`
+9. `AuthProvider` detects the flag and loads account data
+
+## localStorage Flag
+
+The `eve_auth` key in `localStorage` acts as a session indicator:
+
+- **Present**: `AuthProvider.refresh()` makes API calls to load account, tier, and module data
+- **Absent**: `AuthProvider.refresh()` skips all API calls (avoids 401 console noise for logged-out users)
+- **Cleared on logout**: `AuthContext.logout()` removes the flag and clears all state
+- **Cleared on session expiry**: If `authApi.getAccount()` fails, the flag is removed
+
+## AuthContext Shape
+
+Defined in `src/context/AuthContext.tsx`:
+
+```ts
+interface AuthState {
+  isLoading: boolean;         // true during initial session check
+  isLoggedIn: boolean;        // derived: !!account
+  account: AccountInfo | null;
+  tierInfo: TierInfo | null;
+  activeModules: string[];    // list of active module slugs
+  orgPlan: OrgPlan | null;    // corporation/alliance org plan details
+  login: () => Promise<void>; // initiates EVE SSO redirect
+  logout: () => Promise<void>;// clears session + localStorage
+  refresh: () => Promise<void>;// re-fetches account, tier, modules
+}
+```
+
+On mount, `AuthProvider` calls `refresh()` which uses `Promise.allSettled` to fetch account, tier, and module data in parallel. This ensures partial failures (e.g., tier service down) don't block the entire auth flow.
+
+## AccountInfo Type
+
+Defined in `src/types/auth.ts`:
+
+```ts
+interface AccountInfo {
+  account_id: number;              // Platform account ID
+  primary_character_id: number;    // Main EVE character ID
+  primary_character_name: string;  // Main character name
+  tier: string;                    // Subscription tier (free/pilot/corporation/alliance/coalition)
+  subscription_id: number | null;  // Active subscription ID
+  expires_at: string | null;       // Subscription expiry ISO timestamp
+  corporation_id: number | null;   // Character's corporation
+  alliance_id: number | null;      // Character's alliance
+  characters: LinkedCharacter[];   // All linked characters
+  created_at: string;              // Account creation timestamp
+  last_login: string;              // Last login timestamp
+}
+
+interface LinkedCharacter {
+  character_id: number;
+  character_name: string;
+  is_primary: boolean;
+}
+```
+
+## TierInfo Type
+
+```ts
+interface TierInfo {
+  tier: string;                    // Effective tier (free/pilot/corporation/alliance/coalition)
+  subscription_id: number | null;  // Subscription ID if active
+  expires_at: string | null;       // Expiry timestamp
+}
+```
+
+## OrgPlan Type
+
+```ts
+interface OrgPlan {
+  type: 'corporation' | 'alliance';  // Organization type
+  plan: string;                       // Plan name
+  has_seat: boolean;                  // Whether user has a seat in the org plan
+  heavy_seats: number;                // Number of heavy seats available
+  seats_used: number;                 // Number of seats currently used
+  expires_at: string | null;          // Plan expiry
+}
+```
+
+## Tier Hierarchy
+
+Tiers are ordered from lowest to highest access level:
+
+| Tier | Level | Color |
+|------|-------|-------|
+| `free` | 0 | `#8b949e` (gray) |
+| `pilot` | 1 | `#00d4ff` (cyan) |
+| `corporation` | 2 | `#ffcc00` (yellow) |
+| `alliance` | 3 | `#ff4444` (red) |
+| `coalition` | 4 | `#a855f7` (purple) |
+
+Higher tiers include all features of lower tiers. The hierarchy is defined in `TIER_HIERARCHY` in `src/types/auth.ts`.
+
+## API Calls on Auth Refresh
+
+`AuthProvider.refresh()` fires three parallel requests:
+
+| Call | Endpoint | Returns |
+|------|----------|---------|
+| `authApi.getAccount()` | `GET /api/auth/account` | `AccountInfo` |
+| `tierApi.getMyTier()` | `GET /api/tier/me` | `TierInfo` |
+| `moduleApi.getActiveModules()` | `GET /api/settings/modules/active` | `{ modules: string[], org_plan: OrgPlan }` |
+
+All three use `Promise.allSettled`, so a failure in one does not block the others. If the account call fails, the session is considered expired and `localStorage.eve_auth` is cleared.

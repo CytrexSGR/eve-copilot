@@ -1,0 +1,25 @@
+[project]
+name = "market-service"
+version = "0.1.0"
+description = "EVE Online Market Data Service with L1/L2/L3 caching"
+requires-python = ">=3.11"
+dependencies = [
+    "eve-shared",
+    "fastapi>=0.104.0",
+    "uvicorn[standard]>=0.24.0",
+    "pydantic>=2.5.0",
+    "pydantic-settings>=2.1.0",
+    "psycopg2-binary>=2.9.9",
+    "redis>=5.0.0",
+    "httpx>=0.25.0",
+    "structlog>=23.2.0",
+    "prometheus-client>=0.19.0",
+    "apscheduler>=3.10.0",
+]
+
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["."]

@@ -1,0 +1,211 @@
+.telegram-mirror {
+  background: var(--bg-secondary);
+  border-radius: 12px;
+  padding: 1.5rem;
+  border: 1px solid var(--border-color);
+  margin-bottom: 1.5rem;
+}
+
+.telegram-header-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 1rem;
+}
+
+.telegram-header {
+  font-size: 1.125rem;
+  font-weight: 700;
+  color: var(--text-primary);
+  margin: 0;
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+}
+
+.milestones-badge {
+  font-size: 0.75rem;
+  font-weight: 600;
+  background: rgba(239, 68, 68, 0.15);
+  color: var(--danger);
+  padding: 0.25rem 0.5rem;
+  border-radius: 4px;
+}
+
+.telegram-link {
+  font-size: 1.25rem;
+  text-decoration: none;
+  cursor: pointer;
+  opacity: 0.7;
+  transition: opacity 0.2s, transform 0.2s;
+}
+
+.telegram-link:hover {
+  opacity: 1;
+  transform: scale(1.1);
+}
+
+.telegram-container {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  max-height: 400px;
+  overflow-y: auto;
+}
+
+.telegram-alert {
+  background: var(--bg-elevated);
+  border-radius: 8px;
+  padding: 0.625rem 0.875rem;
+  border-left: 3px solid var(--accent-purple);
+  transition: all 0.2s ease;
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+  flex-wrap: wrap;
+}
+
+.telegram-alert:hover {
+  background: var(--bg-hover);
+}
+
+.alert-header {
+  display: flex;
+  align-items: center;
+  gap: 0.375rem;
+  min-width: 140px;
+}
+
+.alert-icon {
+  font-size: 1rem;
+  line-height: 1;
+}
+
+.alert-title {
+  font-size: 0.7rem;
+  font-weight: 700;
+  color: var(--accent-purple);
+  text-transform: uppercase;
+  letter-spacing: 0.025em;
+  white-space: nowrap;
+}
+
+.alert-body {
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+  flex: 1;
+}
+
+.alert-location {
+  font-size: 0.8rem;
+  font-weight: 600;
+  color: var(--text-primary);
+  white-space: nowrap;
+}
+
+.alert-stats {
+  font-size: 0.75rem;
+  color: var(--text-secondary);
+  white-space: nowrap;
+}
+
+.alert-footer {
+  font-size: 0.7rem;
+  color: var(--text-tertiary);
+  display: flex;
+  gap: 0.375rem;
+  margin-left: auto;
+  white-space: nowrap;
+}
+
+.alert-sent {
+  color: var(--text-secondary);
+}
+
+.alert-message-id {
+  color: var(--text-tertiary);
+}
+
+.alert-alliances {
+  display: flex;
+  align-items: center;
+  gap: 0.375rem;
+  flex-wrap: wrap;
+}
+
+.alliance-tag {
+  font-size: 0.65rem;
+  padding: 0.125rem 0.375rem;
+  border-radius: 4px;
+  white-space: nowrap;
+  max-width: 140px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.25rem;
+}
+
+.alliance-logo {
+  width: 14px;
+  height: 14px;
+  border-radius: 2px;
+  flex-shrink: 0;
+}
+
+.alliance-tag.attacker {
+  background: rgba(239, 68, 68, 0.2);
+  color: var(--danger);
+}
+
+.alliance-tag.victim {
+  background: rgba(107, 114, 128, 0.2);
+  color: var(--text-secondary);
+}
+
+.telegram-loading,
+.telegram-error {
+  padding: 2rem;
+  text-align: center;
+  color: var(--text-secondary);
+  font-size: 0.875rem;
+}
+
+.telegram-error {
+  color: var(--danger);
+}
+
+.telegram-empty {
+  padding: 2rem;
+  text-align: center;
+}
+
+.telegram-empty .empty-icon {
+  font-size: 2.5rem;
+  margin-bottom: 0.5rem;
+}
+
+.telegram-empty .empty-text {
+  color: var(--text-secondary);
+  font-size: 0.875rem;
+}
+
+/* Scrollbar styling */
+.telegram-container::-webkit-scrollbar {
+  width: 6px;
+}
+
+.telegram-container::-webkit-scrollbar-track {
+  background: var(--bg-secondary);
+  border-radius: 3px;
+}
+
+.telegram-container::-webkit-scrollbar-thumb {
+  background: var(--border-color);
+  border-radius: 3px;
+}
+
+.telegram-container::-webkit-scrollbar-thumb:hover {
+  background: var(--text-tertiary);
+}

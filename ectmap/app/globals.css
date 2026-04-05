@@ -1,0 +1,34 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  body {
+    @apply bg-black text-gray-100;
+  }
+}
+
+/* Custom scrollbar for detail panels */
+.detail-panel-scroll::-webkit-scrollbar {
+  width: 8px;
+}
+
+.detail-panel-scroll::-webkit-scrollbar-track {
+  background: #1f2937; /* gray-800 */
+  border-radius: 4px;
+}
+
+.detail-panel-scroll::-webkit-scrollbar-thumb {
+  background: #4b5563; /* gray-600 */
+  border-radius: 4px;
+}
+
+.detail-panel-scroll::-webkit-scrollbar-thumb:hover {
+  background: #6b7280; /* gray-500 */
+}
+
+/* Firefox scrollbar */
+.detail-panel-scroll {
+  scrollbar-width: thin;
+  scrollbar-color: #4b5563 #1f2937;
+}

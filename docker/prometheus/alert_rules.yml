@@ -1,0 +1,124 @@
+groups:
+  - name: eve_copilot_alerts
+    interval: 30s
+    rules:
+      # Critical: Service completely down
+      - alert: ServiceDown
+        expr: up{job=~".*-service"} == 0
+        for: 2m
+        labels:
+          severity: critical
+          component: infrastructure
+        annotations:
+          summary: "Service {{ $labels.service }} is DOWN"
+          description: "{{ $labels.instance }} has been unreachable for more than 2 minutes. Immediate action required!"
+          runbook: "Check service logs: docker compose logs {{ $labels.job }}"
+
+      # Critical: High error rate
+      - alert: HighErrorRate
+        expr: |
+          (
+            sum(rate(http_requests_total{status=~"5.."}[5m])) by (service) /
+            sum(rate(http_requests_total[5m])) by (service)
+          ) > 0.05
+        for: 5m
+        labels:
+          severity: warning
+          component: application
+        annotations:
+          summary: "High error rate on {{ $labels.service }}"
+          description: "Service {{ $labels.service }} has {{ $value | humanizePercentage }} error rate (threshold: 5%)"
+          runbook: "Check service logs for 5xx errors: docker compose logs {{ $labels.service }}-service"
+
+      # Warning: High P99 latency
+      - alert: HighLatencyP99
+        expr: |
+          histogram_quantile(0.99,
+            sum(rate(http_request_duration_seconds_bucket[5m])) by (service, le)
+          ) > 5
+        for: 10m
+        labels:
+          severity: warning
+          component: performance
+        annotations:
+          summary: "High P99 latency on {{ $labels.service }}"
+          description: "Service {{ $labels.service }} P99 latency is {{ $value }}s (threshold: 5s)"
+          runbook: "Check slow queries and bottlenecks in Grafana HTTP Performance dashboard"
+
+      # Critical: Prometheus target down
+      - alert: PrometheusTargetDown
+        expr: up == 0
+        for: 2m
+        labels:
+          severity: critical
+          component: monitoring
+        annotations:
+          summary: "Prometheus target {{ $labels.job }} is DOWN"
+          description: "{{ $labels.job }} on {{ $labels.instance }} has been down for more than 2 minutes"
+          runbook: "Check if service is running: docker compose ps {{ $labels.job }}"
+
+      # Warning: Prometheus scrape duration high
+      - alert: PrometheusSlowScrape
+        expr: scrape_duration_seconds > 10
+        for: 5m
+        labels:
+          severity: warning
+          component: monitoring
+        annotations:
+          summary: "Slow Prometheus scrape on {{ $labels.job }}"
+          description: "Scraping {{ $labels.instance }} takes {{ $value }}s (threshold: 10s)"
+          runbook: "Check if service /metrics endpoint is slow or timing out"
+
+      # Warning: High request rate (potential DDoS or traffic spike)
+      - alert: HighRequestRate
+        expr: sum(rate(http_requests_total[5m])) by (service) > 100
+        for: 5m
+        labels:
+          severity: warning
+          component: traffic
+        annotations:
+          summary: "High request rate on {{ $labels.service }}"
+          description: "Service {{ $labels.service }} receiving {{ $value }} req/s (threshold: 100)"
+          runbook: "Check if this is legitimate traffic or potential attack. Review nginx logs."
+
+      # Info: Service restarted
+      - alert: ServiceRestarted
+        expr: time() - process_start_time_seconds{job=~".*-service"} < 300
+        labels:
+          severity: info
+          component: infrastructure
+        annotations:
+          summary: "Service {{ $labels.service }} recently restarted"
+          description: "Service {{ $labels.service }} started {{ $value }}s ago"
+          runbook: "Check if restart was planned. Review startup logs."
+
+      # Warning: No requests in last 10 minutes (might indicate routing issue)
+      - alert: NoTraffic
+        expr: |
+          sum(rate(http_requests_total[10m])) by (service) == 0
+          and
+          up{job=~".*-service"} == 1
+        for: 10m
+        labels:
+          severity: warning
+          component: traffic
+        annotations:
+          summary: "No traffic on {{ $labels.service }}"
+          description: "Service {{ $labels.service }} is UP but received no requests in 10 minutes"
+          runbook: "Check API gateway routing and frontend connectivity"
+
+      # Critical: Error rate spike (sudden increase)
+      - alert: ErrorRateSpike
+        expr: |
+          (
+            rate(http_requests_total{status=~"5.."}[5m]) /
+            rate(http_requests_total{status=~"5.."}[1h] offset 1h)
+          ) > 5
+        for: 2m
+        labels:
+          severity: critical
+          component: application
+        annotations:
+          summary: "Error rate spike on {{ $labels.service }}"
+          description: "Error rate increased 5x compared to 1 hour ago on {{ $labels.service }}"
+          runbook: "Recent deployment or configuration change? Check logs immediately."

@@ -1,0 +1,30 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "eve-war-intel-service"
+version = "1.0.0"
+description = "EVE Co-Pilot War Intelligence Service - zkillboard, battles, intelligence"
+requires-python = ">=3.11"
+dependencies = [
+    "eve-shared",
+    "fastapi>=0.104.0",
+    "uvicorn[standard]>=0.24.0",
+    "httpx>=0.25.0",
+    "redis>=5.0.0",
+    "psycopg2-binary>=2.9.0",
+    "python-telegram-bot>=20.0",
+    "apscheduler>=3.10.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0.0",
+    "pytest-asyncio>=0.21.0",
+    "httpx>=0.25.0",
+]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["app*"]

@@ -1,0 +1,15 @@
+# Development requirements for mcp-service
+# Production uses pyproject.toml dependencies
+
+# Core dependencies
+fastapi>=0.104.0
+uvicorn[standard]>=0.24.0
+httpx>=0.25.0
+pydantic>=2.0.0
+
+# Shared library (install from local path in development)
+# pip install -e ../eve_shared/
+
+# Development dependencies
+pytest>=7.0.0
+pytest-asyncio>=0.21.0

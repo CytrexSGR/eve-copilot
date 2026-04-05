@@ -1,0 +1,343 @@
+{
+  "_description": "Tool risk level configuration. Levels: READ_ONLY, WRITE_LOW_RISK, WRITE_HIGH_RISK, CRITICAL",
+  "_updated": "2026-01-23",
+
+  "context": {
+    "eve_copilot_context": "READ_ONLY",
+    "get_available_tools": "READ_ONLY",
+    "get_regions": "READ_ONLY"
+  },
+
+  "market": {
+    "get_market_stats": "READ_ONLY",
+    "compare_regions": "READ_ONLY",
+    "get_arbitrage_opportunities": "READ_ONLY",
+    "get_enhanced_arbitrage": "READ_ONLY",
+    "calculate_custom_arbitrage": "READ_ONLY",
+    "get_saved_arbitrage": "READ_ONLY",
+    "clear_market_cache": "WRITE_LOW_RISK",
+    "get_market_orders": "READ_ONLY",
+    "get_market_history": "READ_ONLY",
+    "get_market_types": "READ_ONLY",
+    "get_market_groups": "READ_ONLY",
+    "get_market_prices": "READ_ONLY",
+    "compare_market_prices": "READ_ONLY",
+    "compare_region_prices": "READ_ONLY",
+    "find_arbitrage": "READ_ONLY",
+    "enhanced_arbitrage_with_routing": "READ_ONLY",
+    "submit_custom_arbitrage": "WRITE_LOW_RISK",
+    "search_item_groups": "READ_ONLY",
+    "get_all_regions": "READ_ONLY"
+  },
+
+  "production": {
+    "get_production_cost": "READ_ONLY",
+    "optimize_production": "READ_ONLY",
+    "simulate_production": "READ_ONLY",
+    "get_production_chains": "READ_ONLY",
+    "get_chain_materials": "READ_ONLY",
+    "get_direct_materials": "READ_ONLY",
+    "get_production_economics": "READ_ONLY",
+    "get_economic_opportunities": "READ_ONLY",
+    "get_regional_economics": "READ_ONLY",
+    "create_production_job": "WRITE_LOW_RISK",
+    "list_production_jobs": "READ_ONLY",
+    "update_production_job": "WRITE_LOW_RISK",
+    "get_production_job": "READ_ONLY",
+    "delete_production_job": "WRITE_HIGH_RISK",
+    "get_production_chain": "READ_ONLY",
+    "simulate_build": "READ_ONLY",
+    "get_blueprint_info": "READ_ONLY",
+    "get_economics_opportunities": "READ_ONLY",
+    "get_economics_analysis": "READ_ONLY",
+    "get_economics_regions": "READ_ONLY",
+    "create_workflow_job": "WRITE_LOW_RISK",
+    "list_workflow_jobs": "READ_ONLY",
+    "update_workflow_job": "WRITE_LOW_RISK",
+    "get_production_optimize": "READ_ONLY",
+    "batch_production_cost": "READ_ONLY"
+  },
+
+  "war_room": {
+    "get_war_losses": "READ_ONLY",
+    "get_war_demand": "READ_ONLY",
+    "get_combat_hotspots": "READ_ONLY",
+    "get_sov_campaigns": "READ_ONLY",
+    "update_sov_campaigns": "WRITE_LOW_RISK",
+    "get_fw_hotspots": "READ_ONLY",
+    "get_fw_vulnerable": "READ_ONLY",
+    "update_fw_status": "WRITE_LOW_RISK",
+    "get_war_doctrines": "READ_ONLY",
+    "get_alliance_conflicts": "READ_ONLY",
+    "get_system_danger": "READ_ONLY",
+    "get_war_summary": "READ_ONLY",
+    "get_top_ships_destroyed": "READ_ONLY",
+    "get_safe_route": "READ_ONLY",
+    "get_item_combat_stats": "READ_ONLY",
+    "get_war_alerts": "READ_ONLY",
+    "get_active_battles": "READ_ONLY",
+    "get_combat_losses": "READ_ONLY",
+    "get_war_heatmap": "READ_ONLY",
+    "get_war_campaigns": "READ_ONLY",
+    "update_war_campaigns": "WRITE_LOW_RISK",
+    "get_war_fw_hotspots": "READ_ONLY",
+    "get_war_fw_vulnerable": "READ_ONLY",
+    "update_war_fw": "WRITE_LOW_RISK",
+    "get_war_conflicts": "READ_ONLY",
+    "get_war_top_ships": "READ_ONLY"
+  },
+
+  "shopping": {
+    "create_shopping_list": "WRITE_LOW_RISK",
+    "list_shopping_lists": "READ_ONLY",
+    "get_shopping_lists": "READ_ONLY",
+    "add_to_shopping_list": "WRITE_LOW_RISK",
+    "get_shopping_list": "READ_ONLY",
+    "update_shopping_list": "WRITE_LOW_RISK",
+    "delete_shopping_list": "WRITE_HIGH_RISK",
+    "add_shopping_item": "WRITE_LOW_RISK",
+    "update_shopping_item": "WRITE_LOW_RISK",
+    "delete_shopping_item": "WRITE_HIGH_RISK",
+    "mark_item_purchased": "WRITE_LOW_RISK",
+    "unmark_item_purchased": "WRITE_LOW_RISK",
+    "set_purchase_region": "WRITE_LOW_RISK",
+    "update_item_runs": "WRITE_LOW_RISK",
+    "set_build_decision": "WRITE_LOW_RISK",
+    "calculate_item_materials": "READ_ONLY",
+    "apply_materials_to_list": "WRITE_LOW_RISK",
+    "get_item_with_materials": "READ_ONLY",
+    "add_production_to_list": "WRITE_LOW_RISK",
+    "export_shopping_list": "READ_ONLY",
+    "get_list_by_region": "READ_ONLY",
+    "get_regional_comparison": "READ_ONLY",
+    "get_cargo_summary": "READ_ONLY",
+    "get_transport_options": "READ_ONLY",
+    "calculate_shopping_route": "READ_ONLY",
+    "wizard_calculate_materials": "READ_ONLY",
+    "wizard_compare_regions": "READ_ONLY"
+  },
+
+  "character": {
+    "get_character_wallet": "READ_ONLY",
+    "get_character_assets": "READ_ONLY",
+    "get_character_skills": "READ_ONLY",
+    "get_character_skillqueue": "READ_ONLY",
+    "get_character_orders": "READ_ONLY",
+    "get_character_industry": "READ_ONLY",
+    "get_character_blueprints": "READ_ONLY",
+    "get_character_info": "READ_ONLY",
+    "get_character_portrait": "READ_ONLY",
+    "get_corporation_wallet": "READ_ONLY",
+    "get_corporation_info": "READ_ONLY",
+    "get_corporation_journal": "READ_ONLY",
+    "get_authenticated_characters": "READ_ONLY",
+    "get_characters": "READ_ONLY"
+  },
+
+  "dashboard": {
+    "get_market_opportunities": "READ_ONLY",
+    "get_opportunities_by_category": "READ_ONLY",
+    "get_characters_summary": "READ_ONLY",
+    "get_characters_portfolio": "READ_ONLY",
+    "get_active_projects": "READ_ONLY"
+  },
+
+  "research": {
+    "get_skills_for_item": "READ_ONLY",
+    "get_skill_recommendations": "READ_ONLY"
+  },
+
+  "bookmarks": {
+    "create_bookmark": "WRITE_LOW_RISK",
+    "list_bookmarks": "READ_ONLY",
+    "check_bookmark": "READ_ONLY",
+    "update_bookmark": "WRITE_LOW_RISK",
+    "delete_bookmark": "WRITE_HIGH_RISK",
+    "create_bookmark_list": "WRITE_LOW_RISK",
+    "get_bookmark_lists": "READ_ONLY",
+    "add_to_bookmark_list": "WRITE_LOW_RISK",
+    "remove_from_bookmark_list": "WRITE_LOW_RISK",
+    "list_bookmark_lists": "READ_ONLY"
+  },
+
+  "items": {
+    "search_item": "READ_ONLY",
+    "get_item_info": "READ_ONLY",
+    "search_group": "READ_ONLY",
+    "get_material_composition": "READ_ONLY",
+    "get_material_volumes": "READ_ONLY",
+    "get_item_volume": "READ_ONLY",
+    "search_items": "READ_ONLY",
+    "calculate_cargo_volume": "READ_ONLY",
+    "get_item_volume_info": "READ_ONLY",
+    "search_systems": "READ_ONLY",
+    "get_system_info": "READ_ONLY"
+  },
+
+  "routes": {
+    "get_trade_hubs": "READ_ONLY",
+    "get_hub_distances": "READ_ONLY",
+    "calculate_route": "READ_ONLY",
+    "calculate_cargo": "READ_ONLY",
+    "calculate_system_route": "READ_ONLY",
+    "calculate_route_with_danger": "READ_ONLY",
+    "get_system_region": "READ_ONLY"
+  },
+
+  "mining": {
+    "find_mineral_locations": "READ_ONLY",
+    "plan_mining_route": "READ_ONLY",
+    "get_ore_info": "READ_ONLY",
+    "get_system_mining_info": "READ_ONLY",
+    "get_ore_composition": "READ_ONLY"
+  },
+
+  "hunter": {
+    "get_hunter_categories": "READ_ONLY",
+    "get_market_tree": "READ_ONLY",
+    "scan_opportunities": "READ_ONLY",
+    "get_cached_opportunities": "READ_ONLY",
+    "scan_market_opportunities": "READ_ONLY",
+    "get_precalculated_opportunities": "READ_ONLY"
+  },
+
+  "mastery": {
+    "get_ship_mastery": "READ_ONLY",
+    "get_flyable_ships": "READ_ONLY",
+    "search_ship": "READ_ONLY",
+    "compare_ship_mastery": "READ_ONLY"
+  },
+
+  "dps": {
+    "calculate_weapon_dps": "READ_ONLY",
+    "search_weapon_by_name": "READ_ONLY",
+    "search_ammo_by_name": "READ_ONLY",
+    "compare_ammo_dps": "READ_ONLY",
+    "get_ship_damage_bonuses": "READ_ONLY"
+  },
+
+  "fittings": {
+    "get_character_fittings": "READ_ONLY",
+    "analyze_fitting": "READ_ONLY"
+  },
+
+  "pi": {
+    "get_pi_schematics": "READ_ONLY",
+    "get_pi_schematic": "READ_ONLY",
+    "search_pi_schematics": "READ_ONLY",
+    "get_pi_chain": "READ_ONLY",
+    "get_pi_inputs": "READ_ONLY",
+    "calculate_pi_profitability": "READ_ONLY",
+    "get_profitable_pi_products": "READ_ONLY",
+    "get_character_pi_colonies": "READ_ONLY",
+    "sync_character_pi": "WRITE_LOW_RISK",
+    "get_character_pi_summary": "READ_ONLY"
+  },
+
+  "intelligence": {
+    "get_intelligence_alliances": "READ_ONLY",
+    "get_alliance_intelligence": "READ_ONLY",
+    "get_structured_intelligence": "READ_ONLY",
+    "get_counter_fit_recommendations": "READ_ONLY",
+    "get_alliance_combat_profile": "READ_ONLY",
+    "get_alliance_fleet_stats": "READ_ONLY",
+    "get_intelligence_llm_context": "READ_ONLY"
+  },
+
+  "reactions": {
+    "get_all_reactions": "READ_ONLY",
+    "search_reactions": "READ_ONLY",
+    "get_reaction": "READ_ONLY",
+    "calculate_reaction_profitability": "READ_ONLY",
+    "get_profitable_reactions": "READ_ONLY"
+  },
+
+  "panoptikum": {
+    "get_watchlist": "READ_ONLY",
+    "add_to_watchlist": "WRITE_LOW_RISK",
+    "update_watchlist_target": "WRITE_LOW_RISK",
+    "remove_from_watchlist": "WRITE_HIGH_RISK",
+    "get_sightings": "READ_ONLY",
+    "backfill_sightings": "WRITE_LOW_RISK"
+  },
+
+  "supply_chain": {
+    "get_supply_chain_alliances": "READ_ONLY",
+    "get_supply_chain_report": "READ_ONLY",
+    "get_alliance_industry_profile": "READ_ONLY",
+    "get_alliance_logistics_routes": "READ_ONLY",
+    "get_alliance_cargo_fingerprints": "READ_ONLY",
+    "detect_manufacturing_surges": "READ_ONLY",
+    "get_recent_cargo_kills": "READ_ONLY",
+    "get_all_logistics_midpoints": "READ_ONLY"
+  },
+
+  "doctrine": {
+    "get_doctrine_templates": "READ_ONLY",
+    "analyze_fleet": "READ_ONLY",
+    "compare_doctrines": "READ_ONLY",
+    "get_alliance_enemies": "READ_ONLY"
+  },
+
+  "tax_profiles": {
+    "list_tax_profiles": "READ_ONLY",
+    "create_tax_profile": "WRITE_LOW_RISK",
+    "get_tax_profile": "READ_ONLY",
+    "get_default_tax_profile": "READ_ONLY",
+    "update_tax_profile": "WRITE_LOW_RISK",
+    "delete_tax_profile": "WRITE_HIGH_RISK",
+    "list_facilities": "READ_ONLY",
+    "create_facility": "WRITE_LOW_RISK",
+    "get_facility": "READ_ONLY",
+    "update_facility": "WRITE_LOW_RISK",
+    "delete_facility": "WRITE_HIGH_RISK",
+    "get_system_cost_index": "READ_ONLY"
+  },
+
+  "ledger": {
+    "list_ledgers": "READ_ONLY",
+    "create_ledger": "WRITE_LOW_RISK",
+    "get_ledger": "READ_ONLY",
+    "update_ledger": "WRITE_LOW_RISK",
+    "delete_ledger": "WRITE_HIGH_RISK",
+    "list_ledger_stages": "READ_ONLY",
+    "add_ledger_stage": "WRITE_LOW_RISK",
+    "update_ledger_stage": "WRITE_LOW_RISK",
+    "list_ledger_jobs": "READ_ONLY",
+    "add_ledger_job": "WRITE_LOW_RISK",
+    "update_ledger_job": "WRITE_LOW_RISK",
+    "list_ledger_materials": "READ_ONLY",
+    "upsert_ledger_material": "WRITE_LOW_RISK",
+    "recalculate_ledger_costs": "READ_ONLY"
+  },
+
+  "skill_analysis": {
+    "get_isk_opportunities": "READ_ONLY",
+    "get_team_isk_strategy": "READ_ONLY",
+    "get_character_skill_profile": "READ_ONLY",
+    "get_mission_recommendations": "READ_ONLY",
+    "get_mining_fleet_analysis": "READ_ONLY",
+    "get_production_analysis": "READ_ONLY",
+    "get_trading_analysis": "READ_ONLY"
+  },
+
+  "ai_plans": {
+    "create_plan": "WRITE_LOW_RISK",
+    "get_active_plans": "READ_ONLY",
+    "get_plan": "READ_ONLY",
+    "update_plan_progress": "WRITE_LOW_RISK",
+    "complete_plan": "WRITE_LOW_RISK",
+    "add_milestone": "WRITE_LOW_RISK",
+    "update_milestone_progress": "WRITE_LOW_RISK",
+    "link_resource_to_plan": "WRITE_LOW_RISK",
+    "get_session_context": "READ_ONLY",
+    "store_context": "WRITE_LOW_RISK",
+    "create_session_summary": "WRITE_LOW_RISK"
+  },
+
+  "puppeteer": {
+    "puppeteer_navigate": "WRITE_LOW_RISK",
+    "puppeteer_screenshot": "WRITE_LOW_RISK",
+    "puppeteer_click": "WRITE_LOW_RISK"
+  }
+}

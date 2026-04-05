@@ -1,0 +1,113 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+venv/
+.venv/
+venv-public-api/
+env/
+.env
+*.egg-info/
+dist/
+build/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Logs
+logs/
+*.log
+
+# Sensitive files
+tokens.json
+config.py
+config.local.py
+auth_state.json
+scan_results.json
+.env.local
+CLAUDE.md
+CLAUDE.*.md
+docs/security/CREDENTIALS.md
+
+# Node.js / Frontend
+frontend/node_modules/
+frontend/.vite/
+frontend/dist/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Temporary files
+*.tmp
+*.temp
+.cache/
+
+# Runtime data
+data/*.json
+data/cache/*
+!data/.gitkeep
+!data/cache/.gitkeep
+
+# Test scripts in root (not in tests/ directory)
+/test_*.py
+!tests/test_*.py
+!copilot_server/tests/
+
+# Pytest cache
+.pytest_cache/
+__pycache__/
+
+# Utility scripts
+/create_telegram_topics.py
+/get_telegram_channel_ids.py
+/reports/
+*/node_modules
+capitalmap/.next/
+.worktrees/
+
+# E2E / Playwright
+e2e/playwright-report/
+e2e/test-results/
+
+# Build artifacts (broad)
+**/dist/
+**/.next/
+
+# Coverage
+htmlcov/
+.coverage
+
+# Data files (runtime — broad)
+data/
+snapshot.txt
+
+# Screenshots in root
+/*.png
+
+# Logs (additional)
+copilot_logs/
+
+# Claude config
+.claude/
+.claude.bak/
+.claude-flow/
+.mcp.json
+.mcp.json.bak
+
+# Frontend env overrides (specific)
+frontend/.env.local
+unified-frontend/.env.local
+
+# Internal plans
+PROJECT_PLAN.md
+PLAN_*.md
+
+# Backup files
+*.backup-*

@@ -1,0 +1,1182 @@
+# Default logging configuration
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "3"
+    tag: "{{.Name}}"
+
+# Default healthcheck configuration
+x-healthcheck: &default-healthcheck
+  interval: 30s
+  timeout: 10s
+  retries: 3
+  start_period: 40s
+
+services:
+  # =============================================================================
+  # Database Services
+  # =============================================================================
+
+  # postgres:
+  #   Using existing eve_db container on host
+  #   Services connect via host.docker.internal:5432
+
+  redis:
+    image: redis:7-alpine
+    container_name: eve-redis
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:6379:6379"
+    command: >
+      redis-server
+      --appendonly yes
+      --maxmemory 512mb
+      --maxmemory-policy allkeys-lru
+      --requirepass ${REDIS_PASSWORD}
+    volumes:
+      - redis_data:/data
+    networks:
+      - eve-internal
+    logging: *default-logging
+    healthcheck:
+      <<: *default-healthcheck
+      test: ["CMD-SHELL", "redis-cli -a ${REDIS_PASSWORD} ping || exit 1"]
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+          cpus: '0.5'
+
+  # =============================================================================
+  # Observability Stack
+  # =============================================================================
+
+  loki:
+    image: grafana/loki:2.9.0
+    container_name: eve-loki
+    restart: unless-stopped
+    ports:
+      - "3100:3100"
+    command: -config.file=/etc/loki/config.yml
+    volumes:
+      - ./loki/config.yml:/etc/loki/config.yml:ro
+      - loki_data:/loki
+    networks:
+      - eve-internal
+    logging: *default-logging
+    healthcheck:
+      <<: *default-healthcheck
+      test: ["CMD-SHELL", "wget --no-verbose --tries=1 --spider http://localhost:3100/ready || exit 1"]
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+
+  promtail:
+    image: grafana/promtail:2.9.0
+    container_name: eve-promtail
+    restart: unless-stopped
+    volumes:
+      - ./promtail/config.yml:/etc/promtail/config.yml:ro
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - /var/lib/docker/containers:/var/lib/docker/containers:ro
+      - promtail_positions:/var/promtail
+    command: -config.file=/etc/promtail/config.yml
+    networks:
+      - eve-internal
+    logging: *default-logging
+    depends_on:
+      - loki
+
+  prometheus:
+    image: prom/prometheus:v2.47.0
+    container_name: eve-prometheus
+    restart: unless-stopped
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./prometheus/recording_rules.yml:/etc/prometheus/recording_rules.yml:ro
+      - ./prometheus/alert_rules.yml:/etc/prometheus/alert_rules.yml:ro
+      - prometheus_data:/prometheus
+    networks:
+      - eve-internal
+      - eve-public
+    logging: *default-logging
+    healthcheck:
+      <<: *default-healthcheck
+      test: ["CMD-SHELL", "wget --no-verbose --tries=1 --spider http://localhost:9090/-/healthy || exit 1"]
+    deploy:
+      resources:
+        limits:
+          memory: 1G
+
+  grafana:
+    image: grafana/grafana:10.1.0
+    container_name: eve-grafana
+    restart: unless-stopped
+    ports:
+      - "3200:3000"
+    environment:
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_PASSWORD}
+      GF_USERS_ALLOW_SIGN_UP: "false"
+    volumes:
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+      - grafana_data:/var/lib/grafana
+    networks:
+      - eve-internal
+      - eve-public
+    logging: *default-logging
+    healthcheck:
+      <<: *default-healthcheck
+      test: ["CMD-SHELL", "wget --no-verbose --tries=1 --spider http://localhost:3000/api/health || exit 1"]
+    depends_on:
+      - prometheus
+      - loki
+
+
+  alertmanager:
+    image: prom/alertmanager:v0.26.0
+    container_name: eve-alertmanager
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:9093:9093"
+    command:
+      - '--config.file=/etc/alertmanager/alertmanager.yml'
+      - '--storage.path=/alertmanager'
+    volumes:
+      - ./alertmanager/alertmanager.yml:/etc/alertmanager/alertmanager.yml:ro
+      - alertmanager_data:/alertmanager
+    networks:
+      - eve-public
+      - eve-internal
+    logging: *default-logging
+    healthcheck:
+      <<: *default-healthcheck
+      test: ["CMD-SHELL", "wget --no-verbose --tries=1 --spider http://localhost:9093/-/healthy || exit 1"]
+    deploy:
+      resources:
+        limits:
+          memory: 128M
+          cpus: '0.25'
+
+  # =============================================================================
+  # Application Services
+  # =============================================================================
+
+  auth-service:
+    build:
+      context: ..
+      dockerfile: services/auth-service/Dockerfile
+    container_name: eve-auth-service
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:8010:8000"  # Temporary port - public-api uses 8001 until api-gateway takes over
+    environment:
+      # Service
+      SERVICE_NAME: eve-auth-service
+      ENVIRONMENT: ${ENVIRONMENT:-development}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      # Database
+      POSTGRES_HOST: eve_db
+      POSTGRES_PORT: 5432
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
+      # Redis
+      REDIS_URL: ${REDIS_URL}
+      # ESI OAuth
+      ESI_CLIENT_ID: ${ESI_CLIENT_ID}
+      ESI_CLIENT_SECRET: ${ESI_CLIENT_SECRET}
+      ESI_CALLBACK_URL: ${ESI_CALLBACK_URL:-http://localhost:8001/api/auth/callback}
+      # CORS
+      CORS_ORIGINS: ${CORS_ORIGINS:-*}
+      # Token storage (bind mount to host for persistence across rebuilds)
+      TOKEN_FILE: /app/data/tokens.json
+      STATE_FILE: /app/data/auth_state.json
+      # JWT for public sessions (must match api-gateway JWT_SECRET)
+      JWT_SECRET_KEY: ${JWT_SECRET:-8bGKMxz1NMDxDTXrjuXZ90ahVKTM7vp-XSbJXmoe9L0}
+      # Public frontend URL for SSO redirects
+      PUBLIC_FRONTEND_URL: ${PUBLIC_FRONTEND_URL:-http://localhost:5173}
+      # Token encryption (Phase 0) - set in .env for production
+      ESI_SECRET_KEY: ${ESI_SECRET_KEY:-}
+    volumes:
+      - ../data:/app/data
+    networks:
+      - eve-internal
+      - eve-public
+    logging: *default-logging
+    healthcheck:
+      <<: *default-healthcheck
+      test: ["CMD-SHELL", "curl -f http://localhost:8000/health || exit 1"]
+    depends_on:
+      redis:
+        condition: service_healthy
+    labels:
+      - "prometheus.scrape=true"
+      - "prometheus.port=8000"
+      - "prometheus.path=/metrics"
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+          cpus: '0.5'
+
+  war-intel-service:
+    build:
+      context: ..
+      dockerfile: services/war-intel-service/Dockerfile
+    container_name: eve-war-intel-service
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:8002:8000"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    environment:
+      # Service
+      SERVICE_NAME: eve-war-intel-service
+      ENVIRONMENT: ${ENVIRONMENT:-development}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      # Database
+      POSTGRES_HOST: eve_db
+      POSTGRES_PORT: 5432
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
+      # Redis
+      REDIS_URL: ${REDIS_URL}
+      # Cache backend (memory or redis)
+      CACHE_BACKEND: redis
+      # zkillboard - R2Z2 (replaces RedisQ, sunset May 2026)
+      ZKILL_MAX_CONCURRENT_ESI: 10
+      # Telegram (optional)
+      TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:-}
+      TELEGRAM_ALERTS_CHANNEL: ${TELEGRAM_ALERTS_CHANNEL:-}
+      TELEGRAM_ENABLED: ${TELEGRAM_ENABLED:-false}
+      # Inter-service
+      CHARACTER_SERVICE_URL: http://character-service:8000
+      DOTLAN_SERVICE_URL: http://eve-dotlan-service:8000
+      # CORS
+      CORS_ORIGINS: ${CORS_ORIGINS:-*}
+    networks:
+      - eve-internal
+      - eve-public
+    logging: *default-logging
+    healthcheck:
+      <<: *default-healthcheck
+      test: ["CMD-SHELL", "curl -f http://localhost:8000/health || exit 1"]
+    depends_on:
+      redis:
+        condition: service_healthy
+    labels:
+      - "prometheus.scrape=true"
+      - "prometheus.port=8000"
+      - "prometheus.path=/metrics"
+    deploy:
+      resources:
+        limits:
+          memory: 2G
+          cpus: '2'
+
+  scheduler-service:
+    build:
+      context: ..
+      dockerfile: services/scheduler-service/Dockerfile
+    container_name: eve-scheduler-service
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:8003:8000"
+    environment:
+      # Service
+      SERVICE_NAME: eve-scheduler-service
+      ENVIRONMENT: ${ENVIRONMENT:-development}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      # Database (POSTGRES_* for legacy jobs, DB_* for pydantic Settings in src/core/config)
+      POSTGRES_HOST: eve_db
+      POSTGRES_PORT: 5432
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
+      DB_HOST: eve_db
+      DB_PORT: 5432
+      DB_USER: ${POSTGRES_USER}
+      DB_PASSWORD: ${POSTGRES_PASSWORD}
+      DB_NAME: ${POSTGRES_DB}
+      # Redis (used for job store and legacy jobs)
+      REDIS_URL: ${REDIS_URL}
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      REDIS_PASSWORD: ${REDIS_PASSWORD}
+      # Service URLs (for legacy job scripts)
+      API_GATEWAY_URL: http://api-gateway:8000
+      AUTH_SERVICE_URL: http://auth-service:8000
+      WAR_INTEL_SERVICE_URL: http://war-intel-service:8000
+      DOTLAN_SERVICE_URL: http://dotlan-service:8000
+      CHARACTER_SERVICE_URL: http://character-service:8000
+      FINANCE_SERVICE_URL: http://finance-service:8000
+      # EVE SSO (for src/core/config pydantic Settings)
+      EVE_CLIENT_ID: ${EVE_CLIENT_ID:?EVE SSO Client ID required}
+      EVE_CLIENT_SECRET: ${EVE_CLIENT_SECRET:?EVE SSO secret required}
+      EVE_CALLBACK_URL: ${EVE_CALLBACK_URL:-http://localhost:8000/api/auth/callback}
+      # CORS (JSON array for pydantic List[str])
+      CORS_ORIGINS: '["*"]'
+    networks:
+      - eve-internal
+      - eve-public
+    logging: *default-logging
+    healthcheck:
+      <<: *default-healthcheck
+      test: ["CMD-SHELL", "curl -f http://localhost:8000/health || exit 1"]
+    depends_on:
+      redis:
+        condition: service_healthy
+    labels:
+      - "prometheus.scrape=true"
+      - "prometheus.port=8000"
+      - "prometheus.path=/metrics"
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+          cpus: '1'
+
+  market-service:
+    build:
+      context: ..
+      dockerfile: services/market-service/Dockerfile
+    container_name: eve-market-service
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:8004:8000"
+    environment:
+      # Service
+      SERVICE_NAME: eve-market-service
+      ENVIRONMENT: ${ENVIRONMENT:-development}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      # Database
+      POSTGRES_HOST: eve_db
+      POSTGRES_PORT: 5432
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
+      # Redis (L1 cache)
+      REDIS_URL: ${REDIS_URL}
+      # ESI
+      ESI_BASE_URL: https://esi.evetech.net/latest
+      ESI_TIMEOUT: 30
+      # CORS
+      CORS_ORIGINS: ${CORS_ORIGINS:-*}
+    networks:
+      - eve-internal
+      - eve-public
+    logging: *default-logging
+    healthcheck:
+      <<: *default-healthcheck
+      test: ["CMD-SHELL", "curl -f http://localhost:8000/health || exit 1"]
+    depends_on:
+      redis:
+        condition: service_healthy
+    labels:
+      - "prometheus.scrape=true"
+      - "prometheus.port=8000"
+      - "prometheus.path=/metrics"
+    deploy:
+      resources:
+        limits:
+          memory: 768M
+          cpus: '1'
+
+  production-service:
+    build:
+      context: ..
+      dockerfile: services/production-service/Dockerfile
+    container_name: eve-production-service
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:8005:8000"
+    environment:
+      # Service
+      SERVICE_NAME: eve-production-service
+      ENVIRONMENT: ${ENVIRONMENT:-development}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      # Database
+      POSTGRES_HOST: eve_db
+      POSTGRES_PORT: 5432
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
+      # Redis
+      REDIS_URL: ${REDIS_URL}
+      # Market Service (for price lookups)
+      MARKET_SERVICE_URL: http://market-service:8000
+      # Auth Service (for token management)
+      AUTH_SERVICE_URL: http://eve-auth-service:8000
+      # CORS
+      CORS_ORIGINS: ${CORS_ORIGINS:-*}
+    networks:
+      - eve-internal
+      - eve-public
+    logging: *default-logging
+    healthcheck:
+      <<: *default-healthcheck
+      test: ["CMD-SHELL", "curl -f http://localhost:8000/health || exit 1"]
+    depends_on:
+      redis:
+        condition: service_healthy
+    labels:
+      - "prometheus.scrape=true"
+      - "prometheus.port=8000"
+      - "prometheus.path=/metrics"
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+          cpus: '1'
+
+  shopping-service:
+    build:
+      context: ..
+      dockerfile: services/shopping-service/Dockerfile
+    container_name: eve-shopping-service
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:8006:8000"
+    environment:
+      # Service
+      SERVICE_NAME: eve-shopping-service
+      ENVIRONMENT: ${ENVIRONMENT:-development}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      # Database
+      POSTGRES_HOST: eve_db
+      POSTGRES_PORT: 5432
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
+      # Redis
+      REDIS_URL: ${REDIS_URL}
+      # Market Service (for price lookups)
+      MARKET_SERVICE_URL: http://market-service:8000
+      # Production Service (for material calculations)
+      PRODUCTION_SERVICE_URL: http://production-service:8000
+      # Character Service (for doctrine BOM)
+      CHARACTER_SERVICE_URL: http://character-service:8000
+      # CORS
+      CORS_ORIGINS: ${CORS_ORIGINS:-*}
+    networks:
+      - eve-internal
+      - eve-public
+    logging: *default-logging
+    healthcheck:
+      <<: *default-healthcheck
+      test: ["CMD-SHELL", "curl -f http://localhost:8000/health || exit 1"]
+    depends_on:
+      redis:
+        condition: service_healthy
+    labels:
+      - "prometheus.scrape=true"
+      - "prometheus.port=8000"
+      - "prometheus.path=/metrics"
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+          cpus: '1'
+
+  character-service:
+    build:
+      context: ..
+      dockerfile: services/character-service/Dockerfile
+    container_name: eve-character-service
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:8007:8000"
+    environment:
+      # Service
+      SERVICE_NAME: eve-character-service
+      ENVIRONMENT: ${ENVIRONMENT:-development}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      # Database
+      POSTGRES_HOST: eve_db
+      POSTGRES_PORT: 5432
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
+      # Redis (L1 cache)
+      REDIS_URL: ${REDIS_URL}
+      # Auth Service (for token management)
+      AUTH_SERVICE_URL: http://auth-service:8000
+      # War Intel Service (for Dogma Engine EHP calculations)
+      WAR_INTEL_SERVICE_URL: http://war-intel-service:8000
+      # ESI
+      ESI_BASE_URL: https://esi.evetech.net/latest
+      ESI_TIMEOUT: 30
+      # CORS
+      CORS_ORIGINS: ${CORS_ORIGINS:-*}
+    networks:
+      - eve-internal
+      - eve-public
+    logging: *default-logging
+    healthcheck:
+      <<: *default-healthcheck
+      test: ["CMD-SHELL", "curl -f http://localhost:8000/health || exit 1"]
+    depends_on:
+      redis:
+        condition: service_healthy
+      auth-service:
+        condition: service_healthy
+    labels:
+      - "prometheus.scrape=true"
+      - "prometheus.port=8000"
+      - "prometheus.path=/metrics"
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+          cpus: '1'
+
+  # =============================================================================
+  # Wormhole Service (J-Space Intelligence)
+  # =============================================================================
+
+  wormhole-service:
+    build:
+      context: ..
+      dockerfile: services/wormhole-service/Dockerfile
+    container_name: eve-wormhole-service
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:8012:8000"
+    environment:
+      # Service
+      SERVICE_NAME: eve-wormhole-service
+      ENVIRONMENT: ${ENVIRONMENT:-development}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      # Database
+      POSTGRES_HOST: eve_db
+      POSTGRES_PORT: 5432
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
+      # CORS
+      CORS_ORIGINS: ${CORS_ORIGINS:-*}
+    networks:
+      - eve-internal
+      - eve-public
+    logging: *default-logging
+    healthcheck:
+      <<: *default-healthcheck
+      test: ["CMD-SHELL", "curl -f http://localhost:8000/health || exit 1"]
+    depends_on:
+      redis:
+        condition: service_healthy
+    labels:
+      - "prometheus.scrape=true"
+      - "prometheus.port=8000"
+      - "prometheus.path=/metrics"
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+          cpus: '0.5'
+
+  # =============================================================================
+  # MCP Service (AI Tool Server) - OPTIONAL
+  # =============================================================================
+
+  mcp-service:
+    build:
+      context: ..
+      dockerfile: services/mcp-service/Dockerfile
+    container_name: eve-mcp-service
+    restart: unless-stopped
+    ports:
+      - "0.0.0.0:${MCP_SERVICE_PORT:-8008}:8008"
+    environment:
+      # Service
+      SERVICE_NAME: eve-mcp-service
+      ENVIRONMENT: ${ENVIRONMENT:-development}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      # Database
+      POSTGRES_HOST: eve_db
+      POSTGRES_PORT: 5432
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
+      # Redis
+      REDIS_URL: ${REDIS_URL}
+      # Microservice URLs (Docker DNS)
+      AUTH_SERVICE_URL: http://auth-service:8000
+      WAR_INTEL_SERVICE_URL: http://war-intel-service:8000
+      SCHEDULER_SERVICE_URL: http://scheduler-service:8000
+      MARKET_SERVICE_URL: http://market-service:8000
+      PRODUCTION_SERVICE_URL: http://production-service:8000
+      SHOPPING_SERVICE_URL: http://shopping-service:8000
+      CHARACTER_SERVICE_URL: http://character-service:8000
+      MONOLITH_URL: http://api-gateway:8000
+      WORMHOLE_SERVICE_URL: http://wormhole-service:8000
+      DOTLAN_SERVICE_URL: http://dotlan-service:8000
+      HR_SERVICE_URL: http://hr-service:8000
+      FINANCE_SERVICE_URL: http://finance-service:8000
+      MILITARY_SERVICE_URL: http://military-service:8000
+      ZKILLBOARD_SERVICE_URL: http://zkillboard-service:8000
+      ECTMAP_SERVICE_URL: http://ectmap-service:8011
+      # Tool settings
+      TOOL_TIMEOUT_SECONDS: 30
+      # CORS
+      CORS_ORIGINS: ${CORS_ORIGINS:-*}
+    networks:
+      - eve-internal
+      - eve-public
+    logging: *default-logging
+    healthcheck:
+      <<: *default-healthcheck
+      test: ["CMD-SHELL", "curl -f http://localhost:8008/health || exit 1"]
+    depends_on:
+      redis:
+        condition: service_healthy
+      api-gateway:
+        condition: service_healthy
+      auth-service:
+        condition: service_healthy
+      character-service:
+        condition: service_healthy
+      market-service:
+        condition: service_healthy
+      production-service:
+        condition: service_healthy
+      shopping-service:
+        condition: service_healthy
+      war-intel-service:
+        condition: service_healthy
+      scheduler-service:
+        condition: service_healthy
+      wormhole-service:
+        condition: service_healthy
+    labels:
+      - "prometheus.scrape=true"
+      - "prometheus.port=8008"
+      - "prometheus.path=/metrics"
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+          cpus: '0.5'
+
+  # =============================================================================
+  # zkillboard Service (Real-Time Killmail Stream)
+  # =============================================================================
+
+  zkillboard-service:
+    build:
+      context: ..
+      dockerfile: services/zkillboard/Dockerfile
+    container_name: eve-zkillboard-service
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:8013:8000"
+    environment:
+      # Service
+      SERVICE_NAME: eve-zkillboard-service
+      ENVIRONMENT: ${ENVIRONMENT:-development}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      # Database
+      POSTGRES_HOST: eve_db
+      POSTGRES_PORT: 5432
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
+      # Redis
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      REDIS_PASSWORD: ${REDIS_PASSWORD}
+      REDIS_DB: 0
+    networks:
+      - eve-internal
+      - eve-public
+    logging: *default-logging
+    healthcheck:
+      <<: *default-healthcheck
+      test: ["CMD-SHELL", "curl -f http://localhost:8000/health || exit 1"]
+    depends_on:
+      redis:
+        condition: service_healthy
+    labels:
+      - "prometheus.scrape=true"
+      - "prometheus.port=8000"
+      - "prometheus.path=/metrics"
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+          cpus: '1'
+
+  # =============================================================================
+  # ECTMap Service (Screenshot Generation)
+  # =============================================================================
+
+  ectmap-service:
+    build:
+      context: ..
+      dockerfile: services/ectmap-service/Dockerfile
+    container_name: eve-ectmap-service
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:${ECTMAP_SERVICE_PORT:-8011}:8011"
+    environment:
+      # Service
+      SERVICE_NAME: eve-ectmap-service
+      ENVIRONMENT: ${ENVIRONMENT:-development}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      # Database
+      POSTGRES_HOST: eve_db
+      POSTGRES_PORT: 5432
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
+      DATABASE_URL: postgresql://${POSTGRES_USER:-eve}:${POSTGRES_PASSWORD:?DB password required}@eve_db:5432/${POSTGRES_DB:-eve_sde}
+      # External map services (host network)
+      ECTMAP_URL: http://host.docker.internal:3001/ectmap
+      SOVMAP_URL: http://host.docker.internal:3004
+      CAPITALMAP_URL: http://host.docker.internal:3005
+      # Snapshot storage
+      SNAPSHOT_DIR: /app/snapshots
+      WAR_INTEL_URL: http://eve-war-intel-service:8000
+    volumes:
+      - ectmap_snapshots:/app/snapshots
+    networks:
+      - eve-internal
+      - eve-public
+    logging: *default-logging
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:8011/health || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+    labels:
+      - "prometheus.scrape=true"
+      - "prometheus.port=8011"
+      - "prometheus.path=/metrics"
+    deploy:
+      resources:
+        limits:
+          memory: 768M
+          cpus: '1'
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
+  ectmap:
+    build:
+      context: ../ectmap
+      dockerfile: Dockerfile
+    container_name: eve-ectmap-frontend
+    restart: unless-stopped
+    ports:
+      - "${ECTMAP_PORT:-3001}:3001"
+    environment:
+      NODE_ENV: production
+      PORT: 3001
+      HOSTNAME: "0.0.0.0"
+    networks:
+      - eve-public
+    logging: *default-logging
+    healthcheck:
+      test: ["CMD-SHELL", "node -e \"require('http').get('http://localhost:3001/ectmap', (r) => {process.exit(r.statusCode === 200 ? 0 : 1)})\""]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+          cpus: '1'
+
+  public-frontend:
+    build:
+      context: ../public-frontend
+      dockerfile: Dockerfile
+    container_name: eve-public-frontend
+    volumes:
+      - ../public-media:/usr/share/nginx/media:ro
+    restart: unless-stopped
+    ports:
+      - "${PUBLIC_FRONTEND_PORT:-5173}:5173"
+    networks:
+      - eve-public
+      - eve-internal
+    logging: *default-logging
+    healthcheck:
+      test: ["CMD-SHELL", "wget --quiet --tries=1 --spider http://127.0.0.1:5173/ || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    deploy:
+      resources:
+        limits:
+          memory: 128M
+          cpus: '0.25'
+
+  # =============================================================================
+  # Military Service (Fleet Ops, D-Scan, Ops Calendar)
+  # =============================================================================
+
+  military-db:
+    image: postgres:16
+    container_name: eve-military-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: military_db
+      POSTGRES_USER: eve
+      POSTGRES_PASSWORD: eve
+    volumes:
+      - military_db_data:/var/lib/postgresql/data
+    networks:
+      - eve-internal
+    logging: *default-logging
+    healthcheck:
+      <<: *default-healthcheck
+      test: ["CMD-SHELL", "pg_isready -U eve -d military_db"]
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+          cpus: '0.5'
+
+  military-service:
+    build:
+      context: ..
+      dockerfile: services/military-service/Dockerfile
+    container_name: eve-military-service
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:8020:8000"
+    environment:
+      # Service
+      SERVICE_NAME: eve-military-service
+      ENVIRONMENT: ${ENVIRONMENT:-development}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      # Database (own military_db)
+      POSTGRES_HOST: military-db
+      POSTGRES_PORT: 5432
+      POSTGRES_DB: military_db
+      POSTGRES_USER: eve
+      POSTGRES_PASSWORD: eve
+      # SDE database (shared eve_copilot DB)
+      SDE_POSTGRES_HOST: eve_db
+      SDE_POSTGRES_DB: ${POSTGRES_DB}
+      SDE_POSTGRES_USER: ${POSTGRES_USER}
+      SDE_POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      # Redis
+      REDIS_URL: ${REDIS_URL}
+      # Inter-service
+      AUTH_SERVICE_URL: http://auth-service:8000
+      WAR_INTEL_SERVICE_URL: http://war-intel-service:8000
+      # CORS
+      CORS_ORIGINS: ${CORS_ORIGINS:-*}
+    networks:
+      - eve-internal
+      - eve-public
+    logging: *default-logging
+    healthcheck:
+      <<: *default-healthcheck
+      test: ["CMD-SHELL", "curl -f http://localhost:8000/health || exit 1"]
+    depends_on:
+      military-db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      auth-service:
+        condition: service_healthy
+    labels:
+      - "prometheus.scrape=true"
+      - "prometheus.port=8000"
+      - "prometheus.path=/metrics"
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+          cpus: '1'
+
+  # =============================================================================
+  # API Gateway (Main Entry Point)
+  # =============================================================================
+
+  api-gateway:
+    build:
+      context: ..
+      dockerfile: services/api-gateway/Dockerfile
+    container_name: eve-api-gateway
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    environment:
+      # Service
+      SERVICE_NAME: eve-api-gateway
+      ENVIRONMENT: ${ENVIRONMENT:-development}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      # Database
+      POSTGRES_HOST: eve_db
+      POSTGRES_PORT: 5432
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
+      # CORS
+      CORS_ORIGINS: "https://eve.infinimind-creations.com,http://localhost:5175,http://localhost:5173"
+      # Microservice URLs (internal network)
+      AUTH_SERVICE_URL: http://auth-service:8000
+      WAR_INTEL_SERVICE_URL: http://war-intel-service:8000
+      SCHEDULER_SERVICE_URL: http://scheduler-service:8000
+      MARKET_SERVICE_URL: http://market-service:8000
+      PRODUCTION_SERVICE_URL: http://production-service:8000
+      SHOPPING_SERVICE_URL: http://shopping-service:8000
+      CHARACTER_SERVICE_URL: http://character-service:8000
+      WORMHOLE_SERVICE_URL: http://wormhole-service:8000
+      DOTLAN_SERVICE_URL: http://dotlan-service:8000
+      HR_SERVICE_URL: http://hr-service:8000
+      FINANCE_SERVICE_URL: http://finance-service:8000
+      MILITARY_SERVICE_URL: http://military-service:8000
+      # Proxy settings
+      PROXY_TIMEOUT: 60.0
+      PROXY_MAX_CONNECTIONS: 100
+      # Feature gating (SaaS)
+      FEATURE_GATE_ENABLED: ${FEATURE_GATE_ENABLED:-false}
+      # Rate limiting
+      RATE_LIMIT_ENABLED: "true"
+      JWT_SECRET: ${JWT_SECRET:-8bGKMxz1NMDxDTXrjuXZ90ahVKTM7vp-XSbJXmoe9L0}
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      REDIS_PASSWORD: ${REDIS_PASSWORD}
+    volumes:
+      - ../data:/app/data
+    networks:
+      - eve-internal
+      - eve-public
+      - eve-openclaw-shared
+    logging: *default-logging
+    healthcheck:
+      <<: *default-healthcheck
+      test: ["CMD-SHELL", "curl -f http://localhost:8000/health || exit 1"]
+    depends_on:
+      auth-service:
+        condition: service_healthy
+      war-intel-service:
+        condition: service_healthy
+      scheduler-service:
+        condition: service_healthy
+      market-service:
+        condition: service_healthy
+      production-service:
+        condition: service_healthy
+      shopping-service:
+        condition: service_healthy
+      character-service:
+        condition: service_healthy
+      wormhole-service:
+        condition: service_healthy
+      military-service:
+        condition: service_healthy
+    labels:
+      - "prometheus.scrape=true"
+      - "prometheus.port=8000"
+      - "prometheus.path=/metrics"
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+          cpus: '0.5'
+
+  # =============================================================================
+  # DOTLAN Scraping Service
+  # =============================================================================
+
+  dotlan-service:
+    build:
+      context: ..
+      dockerfile: services/dotlan-service/Dockerfile
+    container_name: eve-dotlan-service
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:8014:8000"
+    environment:
+      # Service
+      SERVICE_NAME: eve-dotlan-service
+      ENVIRONMENT: ${ENVIRONMENT:-development}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      # Database
+      POSTGRES_HOST: eve_db
+      POSTGRES_PORT: 5432
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
+      # Redis
+      REDIS_URL: ${REDIS_URL}
+      # DOTLAN Scraping
+      DOTLAN_RATE_LIMIT: "1.0"
+      DOTLAN_SCRAPE_REGIONS: "all"
+      # CORS
+      CORS_ORIGINS: ${CORS_ORIGINS:-*}
+    networks:
+      - eve-internal
+      - eve-public
+    logging: *default-logging
+    healthcheck:
+      <<: *default-healthcheck
+      test: ["CMD-SHELL", "curl -f http://localhost:8000/health || exit 1"]
+    depends_on:
+      redis:
+        condition: service_healthy
+    labels:
+      - "prometheus.scrape=true"
+      - "prometheus.port=8000"
+      - "prometheus.path=/metrics"
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+          cpus: '1'
+
+  # =============================================================================
+  # HR Service (Vetting, Role Sync, Activity Tracking)
+  # =============================================================================
+
+  hr-service:
+    build:
+      context: ..
+      dockerfile: services/hr-service/Dockerfile
+    container_name: eve-hr-service
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:8015:8000"
+    environment:
+      # Service
+      SERVICE_NAME: eve-hr-service
+      ENVIRONMENT: ${ENVIRONMENT:-development}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      # Database
+      POSTGRES_HOST: eve_db
+      POSTGRES_PORT: 5432
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
+      # Redis
+      REDIS_URL: ${REDIS_URL}
+      # Internal service URLs
+      AUTH_SERVICE_URL: http://auth-service:8000
+      CHARACTER_SERVICE_URL: http://character-service:8000
+      # Discord webhook for escalation alerts (optional)
+      DISCORD_WEBHOOK_URL: ${DISCORD_WEBHOOK_URL:-}
+      # CORS
+      CORS_ORIGINS: ${CORS_ORIGINS:-*}
+    networks:
+      - eve-internal
+      - eve-public
+    logging: *default-logging
+    healthcheck:
+      <<: *default-healthcheck
+      test: ["CMD-SHELL", "curl -f http://localhost:8000/health || exit 1"]
+    depends_on:
+      redis:
+        condition: service_healthy
+      auth-service:
+        condition: service_healthy
+      character-service:
+        condition: service_healthy
+    labels:
+      - "prometheus.scrape=true"
+      - "prometheus.port=8000"
+      - "prometheus.path=/metrics"
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+          cpus: '0.5'
+
+  # =============================================================================
+  # Finance Service (Corp Wallets, Mining Tax, Invoicing)
+  # =============================================================================
+
+  finance-service:
+    build:
+      context: ..
+      dockerfile: services/finance-service/Dockerfile
+    container_name: eve-finance-service
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:8016:8000"
+    environment:
+      # Service
+      SERVICE_NAME: eve-finance-service
+      ENVIRONMENT: ${ENVIRONMENT:-development}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      # Database
+      POSTGRES_HOST: eve_db
+      POSTGRES_PORT: 5432
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
+      # Redis
+      REDIS_URL: ${REDIS_URL}
+      # Internal service URLs
+      AUTH_SERVICE_URL: http://auth-service:8000
+      CHARACTER_SERVICE_URL: http://character-service:8000
+      MARKET_SERVICE_URL: http://market-service:8000
+      # Mining tax
+      DEFAULT_TAX_RATE: ${DEFAULT_TAX_RATE:-0.10}
+      DEFAULT_REPROCESSING_YIELD: ${DEFAULT_REPROCESSING_YIELD:-0.85}
+      # CORS
+      CORS_ORIGINS: ${CORS_ORIGINS:-*}
+      # Janice API (Buyback)
+      JANICE_API_KEY: ${JANICE_API_KEY}
+    networks:
+      - eve-internal
+      - eve-public
+    logging: *default-logging
+    healthcheck:
+      <<: *default-healthcheck
+      test: ["CMD-SHELL", "curl -f http://localhost:8000/health || exit 1"]
+    depends_on:
+      redis:
+        condition: service_healthy
+      auth-service:
+        condition: service_healthy
+      character-service:
+        condition: service_healthy
+    labels:
+      - "prometheus.scrape=true"
+      - "prometheus.port=8000"
+      - "prometheus.path=/metrics"
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+          cpus: '0.5'
+
+# =============================================================================
+# Networks
+# =============================================================================
+
+networks:
+  eve-internal:
+    driver: bridge
+    internal: true
+  eve-public:
+    driver: bridge
+  eve-openclaw-shared:
+    external: true
+
+# =============================================================================
+# Volumes
+# =============================================================================
+
+volumes:
+  postgres_data:
+  redis_data:
+  loki_data:
+  prometheus_data:
+  grafana_data:
+  promtail_positions:
+  military_db_data:
+  ectmap_snapshots:
+  alertmanager_data:
+  playwright_browsers:

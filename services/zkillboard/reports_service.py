@@ -1,0 +1,2596 @@
+"""
+zKillboard Reports Service - Combat Intelligence Reports
+
+Provides analytical reports based on killmail data stored in Redis.
+
+Reports:
+- War Profiteering: Market opportunities from destroyed items
+- Alliance War Tracker: Alliance conflicts with kill ratios
+- Trade Route Danger Map: Safety analysis of trade routes
+- 24h Battle Report: Regional combat statistics
+"""
+
+import json
+import aiohttp
+from datetime import datetime
+from typing import Dict, List, Optional
+import redis
+
+from src.database import get_db_connection
+from src.route_service import RouteService, TRADE_HUB_SYSTEMS
+
+# Import mixins from modular package
+from services.zkillboard.reports.kill_analysis import KillAnalysisMixin
+from services.zkillboard.reports.pilot_intelligence import PilotIntelligenceMixin
+from services.zkillboard.reports.war_profiteering import WarProfiteeringMixin
+from services.zkillboard.reports.trade_routes import TradeRoutesMixin
+from services.zkillboard.reports.war_economy import WarEconomyMixin
+from services.zkillboard.reports.alliance_wars import AllianceWarsMixin
+
+
+# Cache Configuration - All reports generated every 6h by cron, TTL 7h for buffer
+REPORT_CACHE_TTL = 7 * 3600  # 7 hours (regenerated every 6h by cron)
+
+# Ship type categories based on groupID from invTypes table
+SHIP_CATEGORIES = {
+    # Capital Ships
+    'titan': [30],  # Titans
+    'supercarrier': [659],  # Supercarriers
+    'carrier': [547],  # Carriers
+    'dreadnought': [485, 4594],  # Dreadnoughts, Lancer Dreadnoughts
+    'force_auxiliary': [1538],  # Force Auxiliaries
+
+    # Subcapital Combat Ships
+    'battleship': [27, 898, 900, 381],  # Battleships, Black Ops, Marauders, Elite
+    'battlecruiser': [419, 540, 1201],  # Battlecruisers, Command Ships, Attack BCs
+    'cruiser': [26, 358, 894, 906, 963, 832, 1972, 833],  # Cruisers, HACs, HICs, Combat/Force Recons, Strategic, Logistics, Flag
+    'destroyer': [420, 541, 1305, 1534],  # Destroyers, Interdictors, Tactical, Command Destroyers
+    'frigate': [25, 324, 831, 893, 830, 834, 1527, 1283, 1022],  # Frigates, AFs, Interceptors, EAFs, Covert Ops, SBs, Logi Frigs, Expedition, Prototype
+
+    # Support Classes
+    'logistics': [832, 1527],  # Logistics Cruisers, Logistics Frigates
+    'stealth_bomber': [834],  # Stealth Bombers (Purifier, Manticore, etc)
+    'capsule': [29],  # Capsules/Pods
+    'corvette': [237, 2001],  # Corvettes, Citizen Ships
+    'shuttle': [31],  # Shuttles
+
+    # Industrial Ships
+    'freighter': [513, 902],  # Freighters, Jump Freighters
+    'industrial': [28, 1202, 380],  # Industrials, Blockade Runners, Deep Space Transports
+    'mining_barge': [463],  # Mining Barges
+    'exhumer': [543],  # Exhumers
+    'industrial_command': [941],  # Industrial Command Ships (Orca, Porpoise)
+    'capital_industrial': [883],  # Capital Industrial Ships (Rorqual)
+
+    # Fighters (Carrier Drones)
+    'fighter': [1652, 1653, 1537, 4777, 4778, 4779],  # Light, Heavy, Support, Structure Fighters
+
+    # Deployables
+    'deployable': [361, 1246, 1250, 1276, 4093, 4107, 4137, 4810, 430, 449, 417, 426, 1249],  # Mobile Warp Disruptors, Depots, Tractors, Sentries, Cyno Inhibitors, etc.
+
+    # Starbases (POSes)
+    'starbase': [365, 363, 471, 441, 443],  # Control Towers, Ship Maint Arrays, Hangar Arrays, Batteries
+
+    # Orbitals
+    'orbital': [1025, 4736],  # Customs Offices, Skyhooks
+
+    # Upwell Structures
+    'citadel': [1657],  # Citadels (Astrahus, Fortizar, Keepstar)
+    'refinery': [1406],  # Refineries (Athanor, Tatara)
+    'structure': [1408, 4744, 1924]  # Jump Bridges, Moon Drills, Strongholds
+}
+
+
+class ZKillboardReportsService(
+    KillAnalysisMixin,
+    PilotIntelligenceMixin,
+    WarProfiteeringMixin,
+    TradeRoutesMixin,
+    WarEconomyMixin,
+    AllianceWarsMixin
+):
+    """
+    Service for generating analytical reports from killmail data.
+
+    This service uses composition via mixins to separate concerns:
+    - KillAnalysisMixin: Basic kill data analysis
+    - PilotIntelligenceMixin: 24h battle reports
+    - WarProfiteeringMixin: Market opportunities
+    - TradeRoutesMixin: Trade route danger analysis
+    - WarEconomyMixin: Fleet doctrines and regional demand
+    - AllianceWarsMixin: Alliance conflict tracking
+    """
+
+    def __init__(self, redis_client: redis.Redis, session: Optional[aiohttp.ClientSession] = None):
+        """
+        Initialize reports service.
+
+        Args:
+            redis_client: Redis client for data access
+            session: Optional aiohttp session for ESI API calls
+        """
+        self.redis_client = redis_client
+        self.session = session
+
+    def get_system_security(self, system_id: int) -> float:
+        """Get security status for a solar system"""
+        with get_db_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    'SELECT security FROM "mapSolarSystems" WHERE "solarSystemID" = %s',
+                    (system_id,)
+                )
+                result = cur.fetchone()
+                return float(result[0]) if result else 0.0
+
+    def get_ship_class(self, ship_type_id: int) -> Optional[str]:
+        """
+        Get ship class from ship_type_id using EVE SDE.
+
+        Returns: 'capital', 'battleship', 'battlecruiser', 'cruiser', 'destroyer', 'frigate',
+                 'logistics', 'stealth_bomber', 'industrial', 'hauler', 'mining', 'capsule',
+                 'other', or None
+        """
+        with get_db_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    'SELECT "groupID" FROM "invTypes" WHERE "typeID" = %s',
+                    (ship_type_id,)
+                )
+                result = cur.fetchone()
+                if not result:
+                    return None
+
+                group_id = result[0]
+
+                # Classify based on group (order matters - most specific first)
+                if group_id in SHIP_CATEGORIES.get('capsule', []):
+                    return 'capsule'
+                elif group_id in SHIP_CATEGORIES.get('titan', []) + SHIP_CATEGORIES.get('supercarrier', []) + \
+                             SHIP_CATEGORIES.get('carrier', []) + SHIP_CATEGORIES.get('dreadnought', []) + \
+                             SHIP_CATEGORIES.get('force_auxiliary', []):
+                    return 'capital'
+                elif group_id in SHIP_CATEGORIES.get('battleship', []):
+                    return 'battleship'
+                elif group_id in SHIP_CATEGORIES.get('battlecruiser', []):
+                    return 'battlecruiser'
+                elif group_id in SHIP_CATEGORIES.get('cruiser', []):
+                    return 'cruiser'
+                elif group_id in SHIP_CATEGORIES.get('destroyer', []):
+                    return 'destroyer'
+                elif group_id in SHIP_CATEGORIES.get('frigate', []):
+                    return 'frigate'
+                elif group_id in SHIP_CATEGORIES.get('logistics', []):
+                    return 'logistics'
+                elif group_id in SHIP_CATEGORIES.get('stealth_bomber', []):
+                    return 'stealth_bomber'
+                elif group_id in SHIP_CATEGORIES.get('freighter', []):
+                    return 'hauler'
+                elif group_id in SHIP_CATEGORIES.get('exhumer', []):
+                    return 'mining'
+                elif group_id in SHIP_CATEGORIES.get('industrial', []):
+                    return 'industrial'
+                else:
+                    return 'other'
+
+    def get_system_location_info(self, system_id: int, cache: Dict = None) -> Dict:
+        """Get full location info for a system (uses cache if provided)"""
+        # Use cache if available
+        if cache and system_id in cache:
+            return cache[system_id]
+
+        with get_db_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    '''
+                    SELECT
+                        s."solarSystemName",
+                        s.security,
+                        c."constellationName",
+                        r."regionName"
+                    FROM "mapSolarSystems" s
+                    JOIN "mapConstellations" c ON s."constellationID" = c."constellationID"
+                    JOIN "mapRegions" r ON s."regionID" = r."regionID"
+                    WHERE s."solarSystemID" = %s
+                    ''',
+                    (system_id,)
+                )
+                result = cur.fetchone()
+                if result:
+                    return {
+                        'system_name': result[0],
+                        'security_status': float(result[1]),
+                        'constellation_name': result[2],
+                        'region_name': result[3]
+                    }
+                return {}
+
+    def get_system_locations_batch(self, system_ids: List[int]) -> Dict[int, Dict]:
+        """Batch load system location info for multiple systems in ONE query"""
+        if not system_ids:
+            return {}
+
+        with get_db_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    '''
+                    SELECT
+                        s."solarSystemID",
+                        s."solarSystemName",
+                        s.security,
+                        c."constellationName",
+                        r."regionName"
+                    FROM "mapSolarSystems" s
+                    JOIN "mapConstellations" c ON s."constellationID" = c."constellationID"
+                    JOIN "mapRegions" r ON s."regionID" = r."regionID"
+                    WHERE s."solarSystemID" = ANY(%s)
+                    ''',
+                    (list(set(system_ids)),)
+                )
+                result = {}
+                for row in cur.fetchall():
+                    result[row[0]] = {
+                        'system_name': row[1],
+                        'security_status': float(row[2]),
+                        'constellation_name': row[3],
+                        'region_name': row[4]
+                    }
+                return result
+
+    def get_ship_info_batch(self, ship_type_ids: List[int]) -> Dict[int, Dict]:
+        """Batch load ship type info (groupID, name) for multiple ships in ONE query"""
+        if not ship_type_ids:
+            return {}
+
+        with get_db_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    'SELECT "typeID", "groupID", "typeName" FROM "invTypes" WHERE "typeID" = ANY(%s)',
+                    (list(set(ship_type_ids)),)
+                )
+                result = {}
+                for row in cur.fetchall():
+                    result[row[0]] = {
+                        'group_id': row[1],
+                        'name': row[2]
+                    }
+                return result
+
+    def get_ship_category(self, group_id: int) -> str:
+        """Determine ship category from group ID"""
+        for category, group_ids in SHIP_CATEGORIES.items():
+            if group_id in group_ids:
+                return category
+        return 'other'
+
+    def is_capital_ship(self, group_id: int) -> bool:
+        """Check if ship is a capital"""
+        capital_categories = ['titan', 'supercarrier', 'carrier', 'dreadnought', 'force_auxiliary']
+        return self.get_ship_category(group_id) in capital_categories
+
+    def is_industrial_ship(self, group_id: int) -> bool:
+        """Check if ship is industrial/hauler"""
+        industrial_categories = [
+            'freighter',           # Freighters, Jump Freighters
+            'industrial',          # Industrials, Blockade Runners, DSTs
+            'exhumer',             # Exhumers
+            'mining_barge',        # Mining Barges
+            'industrial_command',  # Orca, Porpoise
+            'capital_industrial'   # Rorqual
+        ]
+        return self.get_ship_category(group_id) in industrial_categories
+
+    def extract_capital_kills(self, killmails: List[Dict],
+                              system_cache: Dict = None, ship_cache: Dict = None) -> Dict:
+        """Extract and categorize capital kills (uses caches if provided)"""
+        capitals = {
+            'titans': {'count': 0, 'total_isk': 0, 'kills': []},
+            'supercarriers': {'count': 0, 'total_isk': 0, 'kills': []},
+            'carriers': {'count': 0, 'total_isk': 0, 'kills': []},
+            'dreadnoughts': {'count': 0, 'total_isk': 0, 'kills': []},
+            'force_auxiliaries': {'count': 0, 'total_isk': 0, 'kills': []}
+        }
+
+        for km in killmails:
+            ship_type_id = km.get('ship_type_id')
+            if not ship_type_id:
+                continue
+
+            # Use cached ship info or skip
+            ship_info = ship_cache.get(ship_type_id, {}) if ship_cache else {}
+            if not ship_info:
+                continue
+
+            group_id = ship_info.get('group_id')
+            if not group_id:
+                continue
+
+            category = self.get_ship_category(group_id)
+
+            if category not in ['titan', 'supercarrier', 'carrier', 'dreadnought', 'force_auxiliary']:
+                continue
+
+            # Get system info from cache
+            system_id = km.get('solar_system_id')
+            system_info = system_cache.get(system_id, {}) if system_cache else {}
+
+            kill_data = {
+                'killmail_id': km.get('killmail_id'),
+                'ship_name': ship_info.get('name', 'Unknown'),
+                'victim': km.get('victim_character_id', 0),  # Character ID
+                'isk_destroyed': float(km.get('ship_value', 0)),
+                'system_name': system_info.get('system_name', 'Unknown'),
+                'region_name': system_info.get('region_name', 'Unknown'),
+                'security_status': system_info.get('security_status', 0.0),
+                'time_utc': km.get('killmail_time', '')
+            }
+
+            # Add to appropriate category
+            key = category + 's' if category != 'force_auxiliary' else 'force_auxiliaries'
+            if key in capitals:
+                capitals[key]['count'] += 1
+                capitals[key]['total_isk'] += kill_data['isk_destroyed']
+                capitals[key]['kills'].append(kill_data)
+
+        # Sort kills by ISK value within each category
+        for cat_data in capitals.values():
+            cat_data['kills'].sort(key=lambda x: x['isk_destroyed'], reverse=True)
+
+        return capitals
+
+    def extract_high_value_kills(self, killmails: List[Dict], limit: int = 20,
+                                 system_cache: Dict = None, ship_cache: Dict = None) -> List[Dict]:
+        """Extract top N highest value kills (uses caches if provided)"""
+        high_value = []
+
+        for km in killmails:
+            system_id = km.get('solar_system_id')
+            system_info = system_cache.get(system_id, {}) if system_cache else {}
+
+            isk_value = float(km.get('ship_value', 0))
+            security = system_info.get('security_status', 0.0)
+
+            ship_type_id = km.get('ship_type_id', 0)
+            ship_info = ship_cache.get(ship_type_id, {}) if ship_cache else {}
+            group_id = ship_info.get('group_id', 0)
+
+            # Gank detection: high-value kill in HighSec
+            is_gank = security >= 0.5 and isk_value > 1_000_000_000  # 1B ISK threshold
+
+            kill_data = {
+                'killmail_id': km.get('killmail_id'),
+                'isk_destroyed': isk_value,
+                'ship_type': self.get_ship_category(group_id) if group_id else 'unknown',
+                'ship_type_id': ship_type_id,
+                'ship_name': ship_info.get('name', 'Unknown'),
+                'victim': km.get('victim_character_id', 0),
+                'system_id': system_id,
+                'system_name': system_info.get('system_name', 'Unknown'),
+                'region_name': system_info.get('region_name', 'Unknown'),
+                'security_status': security,
+                'is_gank': is_gank,
+                'time_utc': km.get('killmail_time', '')
+            }
+
+            high_value.append(kill_data)
+
+        # Sort by ISK value and take top N
+        high_value.sort(key=lambda x: x['isk_destroyed'], reverse=True)
+
+        # Add rank
+        for idx, kill in enumerate(high_value[:limit], 1):
+            kill['rank'] = idx
+
+        return high_value[:limit]
+
+    def identify_danger_zones(self, killmails: List[Dict], min_kills: int = 3,
+                              system_cache: Dict = None, ship_cache: Dict = None) -> List[Dict]:
+        """Identify systems where industrials/freighters are dying (uses caches if provided)"""
+        system_industrial_kills = {}
+
+        for km in killmails:
+            ship_type_id = km.get('ship_type_id')
+            if not ship_type_id:
+                continue
+
+            # Use cached ship info
+            ship_info = ship_cache.get(ship_type_id, {}) if ship_cache else {}
+            group_id = ship_info.get('group_id')
+            if not group_id or not self.is_industrial_ship(group_id):
+                continue
+
+            system_id = km.get('solar_system_id')
+            if not system_id:
+                continue
+
+            if system_id not in system_industrial_kills:
+                # Use cached system info
+                system_info = system_cache.get(system_id, {}) if system_cache else {}
+                system_industrial_kills[system_id] = {
+                    'system_name': system_info.get('system_name', 'Unknown'),
+                    'region_name': system_info.get('region_name', 'Unknown'),
+                    'security_status': system_info.get('security_status', 0.0),
+                    'industrials_killed': 0,
+                    'freighters_killed': 0,
+                    'total_value': 0,
+                    'kills': []
+                }
+
+            isk_value = float(km.get('ship_value', 0))
+            system_industrial_kills[system_id]['total_value'] += isk_value
+            system_industrial_kills[system_id]['kills'].append(km)
+
+            # Count by type (group_id already loaded from cache above)
+            if self.get_ship_category(group_id) == 'freighter':
+                system_industrial_kills[system_id]['freighters_killed'] += 1
+            else:
+                system_industrial_kills[system_id]['industrials_killed'] += 1
+
+        # Filter systems with minimum kills and calculate warning levels
+        danger_zones = []
+        for sys_id, data in system_industrial_kills.items():
+            total_kills = data['industrials_killed'] + data['freighters_killed']
+            if total_kills < min_kills:
+                continue
+
+            # Warning level based on kills and value
+            if total_kills >= 20 or data['total_value'] > 50_000_000_000:
+                warning_level = 'EXTREME'
+            elif total_kills >= 10 or data['total_value'] > 20_000_000_000:
+                warning_level = 'HIGH'
+            else:
+                warning_level = 'MODERATE'
+
+            data['warning_level'] = warning_level
+            # Remove kills array (not needed in output)
+            del data['kills']
+            danger_zones.append(data)
+
+        # Sort by total value
+        danger_zones.sort(key=lambda x: x['total_value'], reverse=True)
+
+        return danger_zones
+
+    def calculate_ship_breakdown(self, killmails: List[Dict], ship_cache: Dict = None) -> Dict:
+        """Calculate kills and ISK by ship category (uses cache if provided)"""
+        breakdown = {}
+
+        for km in killmails:
+            ship_type_id = km.get('ship_type_id', 0)
+            ship_info = ship_cache.get(ship_type_id, {}) if ship_cache else {}
+            group_id = ship_info.get('group_id', 0)
+            category = self.get_ship_category(group_id) if group_id else 'other'
+
+            if category not in breakdown:
+                breakdown[category] = {
+                    'count': 0,
+                    'total_isk': 0
+                }
+
+            breakdown[category]['count'] += 1
+            breakdown[category]['total_isk'] += float(km.get('ship_value', 0))
+
+        # Sort by ISK value
+        sorted_breakdown = dict(sorted(
+            breakdown.items(),
+            key=lambda x: x[1]['total_isk'],
+            reverse=True
+        ))
+
+        return sorted_breakdown
+
+    def calculate_hourly_timeline(self, killmails: List[Dict]) -> List[Dict]:
+        """Calculate kills and ISK per hour (UTC)"""
+        hourly_data = {hour: {'hour_utc': hour, 'kills': 0, 'isk_destroyed': 0}
+                       for hour in range(24)}
+
+        for km in killmails:
+            time_str = km.get('killmail_time', '')
+            if not time_str:
+                continue
+
+            try:
+                # Parse ISO 8601 timestamp
+                dt = datetime.fromisoformat(time_str.replace('Z', '+00:00'))
+                hour = dt.hour
+
+                hourly_data[hour]['kills'] += 1
+                hourly_data[hour]['isk_destroyed'] += float(km.get('ship_value', 0))
+            except:
+                continue
+
+        # Convert to list and sort by hour
+        timeline = list(hourly_data.values())
+        timeline.sort(key=lambda x: x['hour_utc'])
+
+        return timeline
+
+    def find_peak_activity(self, timeline: List[Dict]) -> Dict:
+        """Find hour with most kills"""
+        if not timeline:
+            return {'hour_utc': 0, 'kills_per_hour': 0, 'isk_per_hour': 0}
+
+        peak = max(timeline, key=lambda x: x['kills'])
+        return {
+            'hour_utc': peak['hour_utc'],
+            'kills_per_hour': peak['kills'],
+            'isk_per_hour': peak['isk_destroyed']
+        }
+
+    def extract_hot_zones(self, killmails: List[Dict], limit: int = 15,
+                          system_cache: Dict = None, ship_cache: Dict = None) -> List[Dict]:
+        """Extract top N most active systems (uses caches if provided)"""
+        system_activity = {}
+
+        for km in killmails:
+            system_id = km.get('solar_system_id')
+            if not system_id:
+                continue
+
+            if system_id not in system_activity:
+                # Use cached system info or fetch individually (fallback)
+                system_info = system_cache.get(system_id, {}) if system_cache else self.get_system_location_info(system_id)
+                system_activity[system_id] = {
+                    'system_id': system_id,
+                    'system_name': system_info.get('system_name', 'Unknown'),
+                    'region_name': system_info.get('region_name', 'Unknown'),
+                    'constellation_name': system_info.get('constellation_name', 'Unknown'),
+                    'security_status': system_info.get('security_status', 0.0),
+                    'kills': 0,
+                    'total_isk_destroyed': 0,
+                    'ship_types': {},
+                    'flags': []
+                }
+
+            system_activity[system_id]['kills'] += 1
+            system_activity[system_id]['total_isk_destroyed'] += float(km.get('ship_value', 0))
+
+            # Track ship types (use cached ship names)
+            ship_type_id = km.get('ship_type_id')
+            ship_name = ship_cache.get(ship_type_id, {}).get('name', 'Unknown') if ship_cache else 'Unknown'
+            if ship_name not in system_activity[system_id]['ship_types']:
+                system_activity[system_id]['ship_types'][ship_name] = 0
+            system_activity[system_id]['ship_types'][ship_name] += 1
+
+        # Determine dominant ship type and flags for each system
+        for sys_data in system_activity.values():
+            if sys_data['ship_types']:
+                dominant = max(sys_data['ship_types'].items(), key=lambda x: x[1])
+                sys_data['dominant_ship_type'] = dominant[0]
+            else:
+                sys_data['dominant_ship_type'] = 'Unknown'
+
+            # Add flags
+            if sys_data['kills'] >= 20:
+                sys_data['flags'].append('high_activity')
+            if sys_data['total_isk_destroyed'] > 10_000_000_000:  # 10B
+                sys_data['flags'].append('high_value')
+
+            # Remove ship_types dict (not needed in output)
+            del sys_data['ship_types']
+
+        # Sort by kills and take top N
+        hot_zones = sorted(system_activity.values(), key=lambda x: x['kills'], reverse=True)[:limit]
+
+        return hot_zones
+
+    def build_pilot_intelligence_report(self) -> Dict:
+        """Build complete pilot intelligence battle report (with cache)"""
+        import time
+        start_time = time.time()
+
+        # Check cache first
+        cache_key = "report:pilot_intelligence:24h"
+        cached_report = self.redis_client.get(cache_key)
+        if cached_report:
+            print(f"[CACHE HIT] Returning cached pilot intelligence report")
+            return json.loads(cached_report)
+
+        print(f"[CACHE MISS] Building pilot intelligence report from scratch...")
+        return self._build_pilot_intelligence_report_internal(start_time, cache_key)
+
+    def build_pilot_intelligence_report_fresh(self) -> Dict:
+        """Build complete pilot intelligence battle report (skip cache, for cron job)"""
+        import time
+        start_time = time.time()
+        print(f"[FRESH] Building pilot intelligence report from scratch...")
+        return self._build_pilot_intelligence_report_internal(start_time, None)
+
+    def _build_pilot_intelligence_report_internal(self, start_time: float, cache_key: str = None) -> Dict:
+        """Internal method to build the report"""
+        import time
+
+        # Get all killmails from Redis using PIPELINE for bulk loading
+        kill_keys = list(self.redis_client.scan_iter("kill:id:*"))
+        print(f"[Performance] Found {len(kill_keys)} killmail keys in {time.time() - start_time:.2f}s")
+
+        # Use pipeline for bulk fetch (10-100x faster than individual gets)
+        pipe_start = time.time()
+        killmails = []
+        if kill_keys:
+            # Process in batches to avoid memory issues
+            BATCH_SIZE = 1000
+            for i in range(0, len(kill_keys), BATCH_SIZE):
+                batch_keys = kill_keys[i:i + BATCH_SIZE]
+                pipe = self.redis_client.pipeline()
+                for key in batch_keys:
+                    pipe.get(key)
+                results = pipe.execute()
+                for kill_data in results:
+                    if kill_data:
+                        killmails.append(json.loads(kill_data))
+
+        print(f"[Performance] Loaded {len(killmails)} killmails via pipeline in {time.time() - pipe_start:.2f}s")
+
+        if not killmails:
+            return self._empty_pilot_report()
+
+        # PRE-LOAD all system and ship data in BATCH (eliminates N+1 queries)
+        batch_start = time.time()
+
+        # Collect all unique system IDs
+        all_system_ids = list(set(km.get('solar_system_id') for km in killmails if km.get('solar_system_id')))
+
+        # Collect all unique ship type IDs
+        all_ship_type_ids = list(set(km.get('ship_type_id') for km in killmails if km.get('ship_type_id')))
+
+        # Batch load system locations (1 query instead of N)
+        system_cache = self.get_system_locations_batch(all_system_ids)
+        print(f"[Performance] Batch loaded {len(system_cache)} systems in {time.time() - batch_start:.2f}s")
+
+        # Batch load ship info (1 query instead of N)
+        ship_start = time.time()
+        ship_cache = self.get_ship_info_batch(all_ship_type_ids)
+        print(f"[Performance] Batch loaded {len(ship_cache)} ship types in {time.time() - ship_start:.2f}s")
+
+        # Calculate all intelligence sections (using caches)
+        calc_start = time.time()
+        timeline = self.calculate_hourly_timeline(killmails)
+        peak_activity = self.find_peak_activity(timeline)
+        hot_zones = self.extract_hot_zones(killmails, limit=15, system_cache=system_cache, ship_cache=ship_cache)
+        capital_kills = self.extract_capital_kills(killmails, system_cache=system_cache, ship_cache=ship_cache)
+        high_value_kills = self.extract_high_value_kills(killmails, limit=20, system_cache=system_cache, ship_cache=ship_cache)
+        danger_zones = self.identify_danger_zones(killmails, min_kills=3, system_cache=system_cache, ship_cache=ship_cache)
+        ship_breakdown = self.calculate_ship_breakdown(killmails, ship_cache=ship_cache)
+        print(f"[Performance] Calculated all sections in {time.time() - calc_start:.2f}s")
+
+        # Calculate global stats
+        total_kills = len(killmails)
+        total_isk = sum(float(km.get('ship_value', 0)) for km in killmails)
+
+        # Build region summary for backwards compatibility
+        region_summary = self._build_region_summary_compat(killmails)
+
+        report = {
+            'period': '24h',
+            'global': {
+                'total_kills': total_kills,
+                'total_isk_destroyed': total_isk,
+                'peak_hour_utc': peak_activity['hour_utc'],
+                'peak_kills_per_hour': peak_activity['kills_per_hour']
+            },
+            'hot_zones': hot_zones,
+            'capital_kills': capital_kills,
+            'high_value_kills': high_value_kills,
+            'danger_zones': danger_zones,
+            'ship_breakdown': ship_breakdown,
+            'timeline': timeline,
+            'regions': region_summary
+        }
+
+        # Cache the report if cache_key provided (not for fresh generation)
+        total_time = time.time() - start_time
+        if cache_key:
+            self.redis_client.setex(cache_key, REPORT_CACHE_TTL, json.dumps(report))
+            print(f"[CACHE] Cached pilot intelligence report for {REPORT_CACHE_TTL}s")
+        print(f"[Performance] TOTAL report generation time: {total_time:.2f}s")
+
+        return report
+
+    def _empty_pilot_report(self) -> Dict:
+        """Return empty report structure"""
+        return {
+            'period': '24h',
+            'global': {'total_kills': 0, 'total_isk_destroyed': 0, 'peak_hour_utc': 0, 'peak_kills_per_hour': 0},
+            'hot_zones': [],
+            'capital_kills': {
+                'titans': {'count': 0, 'total_isk': 0, 'kills': []},
+                'supercarriers': {'count': 0, 'total_isk': 0, 'kills': []},
+                'carriers': {'count': 0, 'total_isk': 0, 'kills': []},
+                'dreadnoughts': {'count': 0, 'total_isk': 0, 'kills': []},
+                'force_auxiliaries': {'count': 0, 'total_isk': 0, 'kills': []}
+            },
+            'high_value_kills': [],
+            'danger_zones': [],
+            'ship_breakdown': {},
+            'timeline': [{'hour_utc': h, 'kills': 0, 'isk_destroyed': 0} for h in range(24)],
+            'regions': []
+        }
+
+    def _build_region_summary_compat(self, killmails: List[Dict]) -> List[Dict]:
+        """Build simplified region summary for backwards compatibility"""
+        # Group kills by region
+        region_data = {}
+        for km in killmails:
+            region_id = km.get('region_id')
+            if not region_id:
+                continue
+
+            if region_id not in region_data:
+                region_data[region_id] = {
+                    'region_id': region_id,
+                    'kills': 0,
+                    'total_isk_destroyed': 0
+                }
+
+            region_data[region_id]['kills'] += 1
+            region_data[region_id]['total_isk_destroyed'] += float(km.get('ship_value', 0))
+
+        # Get region names
+        if region_data:
+            with get_db_connection() as conn:
+                with conn.cursor() as cur:
+                    region_ids = list(region_data.keys())
+                    cur.execute(
+                        'SELECT "regionID", "regionName" FROM "mapRegions" WHERE "regionID" = ANY(%s)',
+                        (region_ids,)
+                    )
+                    for row in cur.fetchall():
+                        if row[0] in region_data:
+                            region_data[row[0]]['region_name'] = row[1]
+
+        # Convert to list and sort
+        regions = list(region_data.values())
+        regions.sort(key=lambda x: x['kills'], reverse=True)
+
+        return regions
+
+    def get_war_profiteering_report(self, limit: int = 20) -> Dict:
+        """
+        Generate war profiteering report with market opportunities.
+
+        Analyzes destroyed items and calculates market opportunity scores
+        based on quantity destroyed and current market prices.
+
+        Args:
+            limit: Number of items to return
+
+        Returns:
+            Dict with top destroyed items and their market opportunity scores
+        """
+        # Check cache first
+        cache_key = f"report:war_profiteering:{limit}"
+        try:
+            cached = self.redis_client.get(cache_key)
+            if cached:
+                print(f"[CACHE HIT] Returning cached war profiteering report")
+                return json.loads(cached)
+        except Exception:
+            pass
+
+        # Get destroyed items from Redis
+        items = []
+        for key in self.redis_client.scan_iter("kill:item:*:destroyed"):
+            parts = key.split(":")
+            if len(parts) == 4:
+                item_type_id = int(parts[2])
+                quantity = int(self.redis_client.get(key) or 0)
+
+                if quantity > 0:  # Only items with actual destruction
+                    items.append({
+                        "item_type_id": item_type_id,
+                        "quantity_destroyed": quantity
+                    })
+
+        if not items:
+            return {"items": [], "total_items": 0, "total_opportunity_value": 0}
+
+        # Batch query for all items with price fallback logic
+        item_data = []
+        with get_db_connection() as conn:
+            with conn.cursor() as cur:
+                # Create temporary table with destroyed items for efficient JOIN
+                item_ids = [item['item_type_id'] for item in items]
+                quantities = {item['item_type_id']: item['quantity_destroyed'] for item in items}
+
+                # Batch query with price fallback: Jita → Adjusted → Base
+                cur.execute(
+                    '''SELECT
+                        t."typeID",
+                        t."typeName",
+                        t."groupID",
+                        g."categoryID",
+                        COALESCE(mp.lowest_sell, mpc.adjusted_price, t."basePrice"::double precision, 0) as final_price
+                       FROM "invTypes" t
+                       JOIN "invGroups" g ON t."groupID" = g."groupID"
+                       LEFT JOIN market_prices mp ON t."typeID" = mp.type_id AND mp.region_id = 10000002
+                       LEFT JOIN market_prices_cache mpc ON t."typeID" = mpc.type_id
+                       WHERE t."typeID" = ANY(%s)''',
+                    (item_ids,)
+                )
+
+                for row in cur.fetchall():
+                    item_id = row[0]
+                    item_name = row[1]
+                    group_id = row[2]
+                    category_id = row[3]
+                    market_price = float(row[4]) if row[4] else 0
+                    quantity = quantities[item_id]
+
+                    # Exclude raw materials, ore, ice, PI materials
+                    # Category 4 = Material, 25 = Asteroid, 43 = Planetary Commodities
+                    if category_id in (4, 25, 43):
+                        continue
+
+                    # Skip items without valid market price
+                    if market_price <= 0:
+                        continue
+
+                    # Calculate opportunity score
+                    opportunity_value = quantity * market_price
+
+                    item_data.append({
+                        "item_type_id": item_id,
+                        "item_name": item_name,
+                        "group_id": group_id,
+                        "quantity_destroyed": quantity,
+                        "market_price": market_price,
+                        "opportunity_value": opportunity_value
+                    })
+
+        # Sort by opportunity value (highest opportunity first)
+        item_data.sort(key=lambda x: x['opportunity_value'], reverse=True)
+
+        # Calculate totals
+        total_opportunity = sum(item['opportunity_value'] for item in item_data[:limit])
+
+        result = {
+            "items": item_data[:limit],
+            "total_items": len(item_data),
+            "total_opportunity_value": total_opportunity,
+            "period": "24h"
+        }
+
+        # Cache for 7 hours
+        try:
+            self.redis_client.setex(cache_key, REPORT_CACHE_TTL, json.dumps(result))
+            print(f"[CACHE] Cached war profiteering report for {REPORT_CACHE_TTL}s")
+        except Exception:
+            pass
+
+        return result
+
+    async def get_alliance_name(self, alliance_id: int) -> str:
+        """
+        Get alliance name from ESI API with Redis caching.
+
+        Args:
+            alliance_id: Alliance ID
+
+        Returns:
+            Alliance name or fallback string
+        """
+        if not alliance_id:
+            return "Unknown"
+
+        cache_key = f"esi:alliance:{alliance_id}:name"
+
+        # Try cache first
+        try:
+            cached = self.redis.get(cache_key)
+            if cached:
+                return cached if isinstance(cached, str) else cached.decode('utf-8')
+        except Exception:
+            pass
+
+        # Fetch from ESI
+        try:
+            async with aiohttp.ClientSession() as session:
+                url = f"https://esi.evetech.net/latest/alliances/{alliance_id}/"
+                async with session.get(url, timeout=aiohttp.ClientTimeout(total=5)) as response:
+                    if response.status == 200:
+                        data = await response.json()
+                        name = data.get("name", f"Alliance {alliance_id}")
+                        # Cache for 7 days
+                        try:
+                            self.redis.setex(cache_key, 7 * 24 * 60 * 60, name)
+                        except Exception:
+                            pass
+                        return name
+        except Exception as e:
+            print(f"Error fetching alliance {alliance_id}: {e}")
+        return f"Alliance {alliance_id}"
+
+    async def get_alliance_war_tracker_postgres(self, limit: int = 10, days: int = 7) -> Dict:
+        """
+        Track active alliance wars using PostgreSQL persistent storage.
+
+        NEW VERSION: Reads from alliance_wars and war_daily_stats tables
+        instead of Redis (which had 24h TTL and data loss).
+
+        Args:
+            limit: Number of wars to return
+            days: How many days of history to analyze
+
+        Returns:
+            Dict with top alliance wars and their statistics
+        """
+        try:
+            with get_db_connection() as conn:
+                with conn.cursor() as cur:
+                    # Get active wars with statistics
+                    cur.execute("""
+                        SELECT
+                            w.war_id,
+                            w.alliance_a_id,
+                            w.alliance_b_id,
+                            w.first_kill_at,
+                            w.last_kill_at,
+                            w.total_kills,
+                            w.total_isk_destroyed,
+                            w.duration_days,
+                            w.status,
+                            -- Recent daily stats (last 7 days)
+                            COALESCE(SUM(wds.kills_by_a), 0) as recent_kills_a,
+                            COALESCE(SUM(wds.kills_by_b), 0) as recent_kills_b,
+                            COALESCE(SUM(wds.isk_destroyed_by_a), 0) as recent_isk_a,
+                            COALESCE(SUM(wds.isk_destroyed_by_b), 0) as recent_isk_b
+                        FROM alliance_wars w
+                        LEFT JOIN war_daily_stats wds ON wds.war_id = w.war_id
+                            AND wds.date >= CURRENT_DATE - INTERVAL '%s days'
+                        WHERE w.status IN ('active', 'dormant')
+                          AND w.total_kills >= 5
+                        GROUP BY w.war_id
+                        ORDER BY w.total_kills DESC, w.total_isk_destroyed DESC
+                        LIMIT %s
+                    """, (days, limit))
+
+                    wars = cur.fetchall()
+
+                    if not wars:
+                        return {"wars": [], "total_wars": 0}
+
+                    war_data = []
+                    for war in wars:
+                        war_id, alliance_a, alliance_b, first_kill, last_kill, total_kills, total_isk, duration, status, \
+                        _, _, _, _ = war  # Ignore war_daily_stats values, we'll get actual data below
+
+                        # Get alliance names
+                        alliance_a_name = await self.get_alliance_name(alliance_a)
+                        alliance_b_name = await self.get_alliance_name(alliance_b)
+
+                        # Count actual ship losses (not multi-alliance inflated stats)
+                        cur.execute("""
+                            SELECT
+                                COUNT(*) FILTER (WHERE k.victim_alliance_id = %s) as alliance_a_losses,
+                                COUNT(*) FILTER (WHERE k.victim_alliance_id = %s) as alliance_b_losses,
+                                COALESCE(SUM(k.ship_value) FILTER (WHERE k.victim_alliance_id = %s), 0) as alliance_a_isk_lost,
+                                COALESCE(SUM(k.ship_value) FILTER (WHERE k.victim_alliance_id = %s), 0) as alliance_b_isk_lost
+                            FROM killmails k
+                            WHERE k.killmail_time >= NOW() - INTERVAL '%s days'
+                              AND (
+                                  (k.victim_alliance_id = %s AND EXISTS (
+                                      SELECT 1 FROM killmail_attackers ka
+                                      WHERE ka.killmail_id = k.killmail_id
+                                      AND ka.alliance_id = %s
+                                  ))
+                                  OR
+                                  (k.victim_alliance_id = %s AND EXISTS (
+                                      SELECT 1 FROM killmail_attackers ka
+                                      WHERE ka.killmail_id = k.killmail_id
+                                      AND ka.alliance_id = %s
+                                  ))
+                              )
+                        """, (alliance_a, alliance_b, alliance_a, alliance_b, days,
+                              alliance_a, alliance_b, alliance_b, alliance_a))
+
+                        actual_result = cur.fetchone()
+                        actual_losses_a, actual_losses_b, actual_isk_lost_a, actual_isk_lost_b = actual_result
+
+                        # Use actual counts instead of war_daily_stats
+                        recent_kills_a = actual_losses_b  # Alliance A killed B's ships
+                        recent_kills_b = actual_losses_a  # Alliance B killed A's ships
+                        recent_isk_a = actual_isk_lost_b  # ISK destroyed by A
+                        recent_isk_b = actual_isk_lost_a  # ISK destroyed by B
+
+                        # Calculate metrics using ACTUAL values (not war_daily_stats)
+                        kill_ratio_a = recent_kills_a / max(recent_kills_b, 1)
+                        isk_efficiency_a = (recent_isk_a / (recent_isk_a + recent_isk_b)) * 100 if (recent_isk_a + recent_isk_b) > 0 else 50
+                        isk_efficiency_b = 100 - isk_efficiency_a
+
+                        # Determine winners based on actual data
+                        tactical_winner = "a" if kill_ratio_a > 1.2 else "b" if kill_ratio_a < 0.8 else "contested"
+                        economic_winner = "a" if isk_efficiency_a > 60 else "b" if isk_efficiency_a < 40 else "contested"
+
+                        # Overall winner (weighted: 60% economic, 40% tactical)
+                        if isk_efficiency_a > 55 or (isk_efficiency_a > 45 and kill_ratio_a > 1.5):
+                            overall_winner = "a"
+                        elif isk_efficiency_a < 45 or (isk_efficiency_a < 55 and kill_ratio_a < 0.67):
+                            overall_winner = "b"
+                        else:
+                            overall_winner = "contested"
+
+                        # Get system hotspots for this war (count each ship once)
+                        cur.execute("""
+                            SELECT
+                                k.solar_system_id,
+                                COUNT(*) as kill_count
+                            FROM killmails k
+                            WHERE k.killmail_time >= NOW() - INTERVAL '%s days'
+                              AND (
+                                  (k.victim_alliance_id = %s AND EXISTS (
+                                      SELECT 1 FROM killmail_attackers ka
+                                      WHERE ka.killmail_id = k.killmail_id
+                                      AND ka.alliance_id = %s
+                                  ))
+                                  OR
+                                  (k.victim_alliance_id = %s AND EXISTS (
+                                      SELECT 1 FROM killmail_attackers ka
+                                      WHERE ka.killmail_id = k.killmail_id
+                                      AND ka.alliance_id = %s
+                                  ))
+                              )
+                            GROUP BY k.solar_system_id
+                            ORDER BY kill_count DESC
+                            LIMIT 5
+                        """, (days, alliance_a, alliance_b, alliance_b, alliance_a))
+
+                        system_hotspots = []
+                        for sys_id, kill_count in cur.fetchall():
+                            sys_info = self.get_system_location_info(sys_id)
+                            system_hotspots.append({
+                                "system_id": sys_id,
+                                "system_name": sys_info.get("system_name", f"System {sys_id}"),
+                                "kills": kill_count,
+                                "security": sys_info.get("security", 0.0),
+                                "region_name": sys_info.get("region_name", "Unknown")
+                            })
+
+                        # Get ship class breakdown (count each kill once, not per attacker)
+                        cur.execute("""
+                            SELECT
+                                CASE
+                                    WHEN ig."groupID" IN (29) THEN 'capsule'
+                                    WHEN ig."groupID" IN (30, 659, 547, 485, 1538) THEN 'capital'
+                                    WHEN ig."groupID" IN (27, 898, 900) THEN 'battleship'
+                                    WHEN ig."groupID" IN (419, 540) THEN 'battlecruiser'
+                                    WHEN ig."groupID" IN (26, 358, 894, 906, 963) THEN 'cruiser'
+                                    WHEN ig."groupID" IN (420, 541, 1305) THEN 'destroyer'
+                                    WHEN ig."groupID" IN (25, 324, 831, 893) THEN 'frigate'
+                                    WHEN ig."groupID" IN (832) THEN 'logistics'
+                                    WHEN ig."groupID" IN (834) THEN 'stealth_bomber'
+                                    WHEN ig."groupID" IN (513, 902) THEN 'hauler'
+                                    WHEN ig."groupID" IN (543) THEN 'mining'
+                                    WHEN ig."groupID" IN (28, 463) THEN 'industrial'
+                                    ELSE 'other'
+                                END as ship_class,
+                                k.victim_alliance_id,
+                                COUNT(*) as count
+                            FROM killmails k
+                            LEFT JOIN "invTypes" it ON it."typeID" = k.ship_type_id
+                            LEFT JOIN "invGroups" ig ON ig."groupID" = it."groupID"
+                            WHERE k.killmail_time >= NOW() - INTERVAL '%s days'
+                              AND (
+                                  (k.victim_alliance_id = %s AND EXISTS (
+                                      SELECT 1 FROM killmail_attackers ka
+                                      WHERE ka.killmail_id = k.killmail_id
+                                      AND ka.alliance_id = %s
+                                  ))
+                                  OR
+                                  (k.victim_alliance_id = %s AND EXISTS (
+                                      SELECT 1 FROM killmail_attackers ka
+                                      WHERE ka.killmail_id = k.killmail_id
+                                      AND ka.alliance_id = %s
+                                  ))
+                              )
+                            GROUP BY 1, 2
+                        """, (days, alliance_a, alliance_b, alliance_b, alliance_a))
+
+                        ship_classes_a = {
+                            "capital": 0, "battleship": 0, "battlecruiser": 0, "cruiser": 0,
+                            "destroyer": 0, "frigate": 0, "logistics": 0, "stealth_bomber": 0,
+                            "industrial": 0, "hauler": 0, "mining": 0, "capsule": 0, "other": 0
+                        }
+                        ship_classes_b = {
+                            "capital": 0, "battleship": 0, "battlecruiser": 0, "cruiser": 0,
+                            "destroyer": 0, "frigate": 0, "logistics": 0, "stealth_bomber": 0,
+                            "industrial": 0, "hauler": 0, "mining": 0, "capsule": 0, "other": 0
+                        }
+
+                        for ship_class, victim_alliance_id, count in cur.fetchall():
+                            if victim_alliance_id == alliance_a:
+                                ship_classes_a[ship_class] = count
+                            elif victim_alliance_id == alliance_b:
+                                ship_classes_b[ship_class] = count
+
+                        # Get biggest loss for alliance A
+                        cur.execute("""
+                            SELECT k.ship_type_id, k.ship_value
+                            FROM killmails k
+                            WHERE k.killmail_time >= NOW() - INTERVAL '%s days'
+                              AND k.victim_alliance_id = %s
+                              AND EXISTS (
+                                  SELECT 1 FROM killmail_attackers ka
+                                  WHERE ka.killmail_id = k.killmail_id
+                                  AND ka.alliance_id = %s
+                              )
+                            ORDER BY k.ship_value DESC
+                            LIMIT 1
+                        """, (days, alliance_a, alliance_b))
+
+                        result_a = cur.fetchone()
+                        biggest_loss_a = {"ship_type_id": result_a[0], "value": int(result_a[1])} if result_a else {"ship_type_id": None, "value": 0}
+
+                        # Get biggest loss for alliance B
+                        cur.execute("""
+                            SELECT k.ship_type_id, k.ship_value
+                            FROM killmails k
+                            WHERE k.killmail_time >= NOW() - INTERVAL '%s days'
+                              AND k.victim_alliance_id = %s
+                              AND EXISTS (
+                                  SELECT 1 FROM killmail_attackers ka
+                                  WHERE ka.killmail_id = k.killmail_id
+                                  AND ka.alliance_id = %s
+                              )
+                            ORDER BY k.ship_value DESC
+                            LIMIT 1
+                        """, (days, alliance_b, alliance_a))
+
+                        result_b = cur.fetchone()
+                        biggest_loss_b = {"ship_type_id": result_b[0], "value": int(result_b[1])} if result_b else {"ship_type_id": None, "value": 0}
+
+                        # Calculate war intensity score
+                        isk_score = (total_isk / 1e9) * 0.6
+                        kill_score = total_kills * 0.3
+                        system_score = len(system_hotspots) * 0.1
+                        war_score = isk_score + kill_score + system_score
+
+                        war_data.append({
+                            "war_id": war_id,
+                            "alliance_a_id": alliance_a,
+                            "alliance_a_name": alliance_a_name,
+                            "alliance_b_id": alliance_b,
+                            "alliance_b_name": alliance_b_name,
+                            "kills_by_a": int(recent_kills_a),
+                            "kills_by_b": int(recent_kills_b),
+                            "isk_by_a": int(recent_isk_a),
+                            "isk_by_b": int(recent_isk_b),
+                            "total_kills": total_kills,
+                            "total_isk": int(total_isk),
+                            "duration_days": duration if duration else 0,
+                            "status": status,
+                            "kill_ratio_a": round(kill_ratio_a, 2),
+                            "isk_efficiency_a": round(isk_efficiency_a, 1),
+                            "isk_efficiency_b": round(isk_efficiency_b, 1),
+                            "tactical_winner": tactical_winner,
+                            "economic_winner": economic_winner,
+                            "overall_winner": overall_winner,
+                            "war_score": round(war_score, 2),
+                            "system_hotspots": system_hotspots,
+                            "ship_classes_a": ship_classes_a,
+                            "ship_classes_b": ship_classes_b,
+                            "biggest_loss_a": biggest_loss_a,
+                            "biggest_loss_b": biggest_loss_b,
+                            "first_kill_at": first_kill.isoformat() if first_kill else None,
+                            "last_kill_at": last_kill.isoformat() if last_kill else None
+                        })
+
+                    return {
+                        "wars": war_data,
+                        "total_wars": len(war_data),
+                        "analysis_period_days": days
+                    }
+
+        except Exception as e:
+            print(f"Error getting alliance wars from PostgreSQL: {e}")
+            return {"wars": [], "total_wars": 0, "error": str(e)}
+
+    async def get_alliance_war_tracker(self, limit: int = 5) -> Dict:
+        """
+        Track active alliance wars with kill/death ratios and ISK efficiency.
+
+        NEW: This method now uses PostgreSQL persistent storage instead of Redis.
+        Redirects to get_alliance_war_tracker_postgres() for accurate historical data.
+
+        Args:
+            limit: Number of wars to return
+
+        Returns:
+            Dict with top alliance wars and their statistics
+        """
+        # Check cache first
+        cache_key = f"report:alliance_wars:{limit}"
+        try:
+            cached = self.redis_client.get(cache_key)
+            if cached:
+                print(f"[CACHE HIT] Returning cached alliance wars report")
+                return json.loads(cached)
+        except Exception:
+            pass
+
+        # Get from PostgreSQL
+        result = await self.get_alliance_war_tracker_postgres(limit=limit, days=7)
+
+        # Cache for 7 hours
+        try:
+            self.redis_client.setex(cache_key, REPORT_CACHE_TTL, json.dumps(result))
+            print(f"[CACHE] Cached alliance wars report for {REPORT_CACHE_TTL}s")
+        except Exception:
+            pass
+
+        return result
+
+    async def get_alliance_war_tracker_redis_legacy(self, limit: int = 5) -> Dict:
+        """
+        LEGACY: Track active alliance wars using Redis (24h TTL data).
+
+        This method is kept for reference but is deprecated in favor of
+        get_alliance_war_tracker_postgres() which uses permanent storage.
+
+        Args:
+            limit: Number of wars to return
+
+        Returns:
+            Dict with top alliance wars and their statistics
+        """
+        # Get all kills with alliance data
+        kill_ids = list(self.redis_client.scan_iter("kill:id:*"))
+
+        kills = []
+        for kill_id_key in kill_ids[:1000]:  # Sample last 1000 kills
+            kill_data = self.redis_client.get(kill_id_key)
+            if kill_data:
+                kill = json.loads(kill_data)
+                if kill.get('victim_alliance_id') and kill.get('attacker_alliances'):
+                    kills.append(kill)
+
+        if not kills:
+            return {"wars": [], "total_wars": 0}
+
+        # Build alliance vs alliance conflict matrix
+        conflicts = {}  # (alliance_a, alliance_b) -> {kills, isk, systems, ship_classes, timeline, etc}
+
+        for kill in kills:
+            victim_alliance = kill.get('victim_alliance_id')
+            attacker_alliances = kill.get('attacker_alliances', [])
+            ship_value = kill.get('ship_value', 0)
+            ship_type_id = kill.get('ship_type_id')
+            system_id = kill.get('solar_system_id')
+            killmail_time = kill.get('killmail_time')
+
+            for attacker_alliance in set(attacker_alliances):  # Unique attackers per kill
+                if attacker_alliance and victim_alliance and attacker_alliance != victim_alliance:
+                    # Create conflict key (sorted to ensure A vs B = B vs A)
+                    alliance_pair = tuple(sorted([attacker_alliance, victim_alliance]))
+
+                    if alliance_pair not in conflicts:
+                        conflicts[alliance_pair] = {
+                            "alliance_a": alliance_pair[0],
+                            "alliance_b": alliance_pair[1],
+                            "kills_by_a": 0,
+                            "kills_by_b": 0,
+                            "isk_by_a": 0,
+                            "isk_by_b": 0,
+                            "systems": {},  # system_id -> kill count
+                            "ship_classes_a": {
+                                "capital": 0, "battleship": 0, "battlecruiser": 0, "cruiser": 0,
+                                "destroyer": 0, "frigate": 0, "industrial": 0, "hauler": 0,
+                                "mining": 0, "capsule": 0, "other": 0
+                            },
+                            "ship_classes_b": {
+                                "capital": 0, "battleship": 0, "battlecruiser": 0, "cruiser": 0,
+                                "destroyer": 0, "frigate": 0, "industrial": 0, "hauler": 0,
+                                "mining": 0, "capsule": 0, "other": 0
+                            },
+                            "hourly_activity": {},  # hour (0-23) -> kill count
+                            "biggest_loss_a": {"ship_type_id": None, "value": 0},
+                            "biggest_loss_b": {"ship_type_id": None, "value": 0},
+                            "kills_timeline": []  # List of (timestamp, value) for tracking
+                        }
+
+                    # Determine who killed who
+                    is_a_killed = (attacker_alliance == alliance_pair[0])
+
+                    if is_a_killed:
+                        conflicts[alliance_pair]["kills_by_a"] += 1
+                        conflicts[alliance_pair]["isk_by_a"] += ship_value
+
+                        # Track biggest loss for B (victim)
+                        if ship_value > conflicts[alliance_pair]["biggest_loss_b"]["value"]:
+                            conflicts[alliance_pair]["biggest_loss_b"]["value"] = ship_value
+                            conflicts[alliance_pair]["biggest_loss_b"]["ship_type_id"] = ship_type_id
+
+                        # Track ship class destroyed (B's loss)
+                        ship_class = self.get_ship_class(ship_type_id)
+                        if ship_class:
+                            conflicts[alliance_pair]["ship_classes_b"][ship_class] += 1
+                    else:
+                        conflicts[alliance_pair]["kills_by_b"] += 1
+                        conflicts[alliance_pair]["isk_by_b"] += ship_value
+
+                        # Track biggest loss for A (victim)
+                        if ship_value > conflicts[alliance_pair]["biggest_loss_a"]["value"]:
+                            conflicts[alliance_pair]["biggest_loss_a"]["value"] = ship_value
+                            conflicts[alliance_pair]["biggest_loss_a"]["ship_type_id"] = ship_type_id
+
+                        # Track ship class destroyed (A's loss)
+                        ship_class = self.get_ship_class(ship_type_id)
+                        if ship_class:
+                            conflicts[alliance_pair]["ship_classes_a"][ship_class] += 1
+
+                    # Track system hotspots
+                    if system_id:
+                        if system_id not in conflicts[alliance_pair]["systems"]:
+                            conflicts[alliance_pair]["systems"][system_id] = 0
+                        conflicts[alliance_pair]["systems"][system_id] += 1
+
+                    # Track hourly activity
+                    if killmail_time:
+                        try:
+                            dt = datetime.fromisoformat(killmail_time.replace('Z', '+00:00'))
+                            hour = dt.hour
+                            if hour not in conflicts[alliance_pair]["hourly_activity"]:
+                                conflicts[alliance_pair]["hourly_activity"][hour] = 0
+                            conflicts[alliance_pair]["hourly_activity"][hour] += 1
+                        except:
+                            pass
+
+        # Calculate metrics
+        war_data = []
+        for alliance_pair, data in conflicts.items():
+            total_kills = data["kills_by_a"] + data["kills_by_b"]
+            total_isk = data["isk_by_a"] + data["isk_by_b"]
+
+            # Only include significant conflicts (minimum 5 mutual kills)
+            if total_kills < 5:
+                continue
+
+            # Calculate ratios
+            kill_ratio_a = data["kills_by_a"] / max(data["kills_by_b"], 1)
+
+            # Calculate ISK efficiency (percentage of total ISK destroyed by alliance A)
+            isk_efficiency_a = (data["isk_by_a"] / (data["isk_by_a"] + data["isk_by_b"])) * 100 if (data["isk_by_a"] + data["isk_by_b"]) > 0 else 50
+            isk_efficiency_b = (data["isk_by_b"] / (data["isk_by_a"] + data["isk_by_b"])) * 100 if (data["isk_by_a"] + data["isk_by_b"]) > 0 else 50
+
+            # Calculate war intensity score (weighted by ISK, kills, and spread)
+            # ISK is normalized to billions for scoring
+            isk_score = (total_isk / 1e9) * 0.6  # 60% weight on ISK destroyed
+            kill_score = total_kills * 0.3       # 30% weight on kill count
+            system_score = len(data["systems"]) * 0.1  # 10% weight on conflict spread
+            war_score = isk_score + kill_score + system_score
+
+            # Determine winner based on combined metrics
+            # Tactical winner: more kills
+            tactical_winner = "a" if kill_ratio_a > 1.2 else "b" if kill_ratio_a < 0.8 else "contested"
+            # Economic winner: higher ISK efficiency
+            economic_winner = "a" if isk_efficiency_a > 60 else "b" if isk_efficiency_a < 40 else "contested"
+
+            # Overall winner: weighted combination (60% economic, 40% tactical)
+            # A wins if: ISK efficiency > 55% OR (ISK efficiency > 45% AND kill ratio > 1.5)
+            # B wins if: ISK efficiency < 45% OR (ISK efficiency < 55% AND kill ratio < 0.67)
+            if isk_efficiency_a > 55 or (isk_efficiency_a > 45 and kill_ratio_a > 1.5):
+                overall_winner = "a"
+            elif isk_efficiency_a < 45 or (isk_efficiency_a < 55 and kill_ratio_a < 0.67):
+                overall_winner = "b"
+            else:
+                overall_winner = "contested"
+
+            # Get top 5 system hotspots (sorted by kill count)
+            top_systems = sorted(data["systems"].items(), key=lambda x: x[1], reverse=True)[:5]
+            system_hotspots = []
+            for system_id, kill_count in top_systems:
+                system_info = self.get_system_location_info(system_id)
+                system_hotspots.append({
+                    "system_id": system_id,
+                    "system_name": system_info.get("system_name", f"System {system_id}"),
+                    "kills": kill_count,
+                    "security": system_info.get("security", 0.0),
+                    "region_name": system_info.get("region_name", "Unknown")
+                })
+
+            # Determine peak activity hours (top 3 hours)
+            if data["hourly_activity"]:
+                peak_hours = sorted(data["hourly_activity"].items(), key=lambda x: x[1], reverse=True)[:3]
+                peak_hours_list = [hour for hour, count in peak_hours]
+            else:
+                peak_hours_list = []
+
+            # Calculate average kill value
+            avg_kill_value = total_isk / total_kills if total_kills > 0 else 0
+
+            war_data.append({
+                "alliance_a_id": data["alliance_a"],
+                "alliance_b_id": data["alliance_b"],
+                "total_kills": total_kills,
+                "kills_by_a": data["kills_by_a"],
+                "kills_by_b": data["kills_by_b"],
+                "isk_destroyed_by_a": data["isk_by_a"],
+                "isk_destroyed_by_b": data["isk_by_b"],
+                "total_isk_destroyed": total_isk,
+                "kill_ratio_a": kill_ratio_a,
+                "isk_efficiency_a": isk_efficiency_a,
+                "isk_efficiency_b": isk_efficiency_b,
+                "active_systems": len(data["systems"]),
+                "war_intensity_score": war_score,
+                "tactical_winner": tactical_winner,
+                "economic_winner": economic_winner,
+                "winner": overall_winner,
+                # NEW: Ship Class Analysis
+                "ship_classes_a": data["ship_classes_a"],
+                "ship_classes_b": data["ship_classes_b"],
+                # NEW: System Hotspots
+                "system_hotspots": system_hotspots,
+                # NEW: Activity Timeline
+                "hourly_activity": data["hourly_activity"],
+                "peak_hours": peak_hours_list,
+                # NEW: Economic Metrics
+                "avg_kill_value": avg_kill_value,
+                "biggest_loss_a": data["biggest_loss_a"],
+                "biggest_loss_b": data["biggest_loss_b"]
+            })
+
+        # Sort by war intensity score (ISK-weighted activity)
+        war_data.sort(key=lambda x: x['war_intensity_score'], reverse=True)
+
+        # Get alliance names from ESI
+        if not self.session or self.session.closed:
+            self.session = aiohttp.ClientSession()
+
+        for war in war_data[:limit]:
+            # Get alliance A name
+            try:
+                url = f"https://esi.evetech.net/latest/alliances/{war['alliance_a_id']}/"
+                async with self.session.get(url, timeout=aiohttp.ClientTimeout(total=3)) as response:
+                    if response.status == 200:
+                        data = await response.json()
+                        war['alliance_a_name'] = data.get('name', f"Alliance {war['alliance_a_id']}")
+                    else:
+                        war['alliance_a_name'] = f"Alliance {war['alliance_a_id']}"
+            except:
+                war['alliance_a_name'] = f"Alliance {war['alliance_a_id']}"
+
+            # Get alliance B name
+            try:
+                url = f"https://esi.evetech.net/latest/alliances/{war['alliance_b_id']}/"
+                async with self.session.get(url, timeout=aiohttp.ClientTimeout(total=3)) as response:
+                    if response.status == 200:
+                        data = await response.json()
+                        war['alliance_b_name'] = data.get('name', f"Alliance {war['alliance_b_id']}")
+                    else:
+                        war['alliance_b_name'] = f"Alliance {war['alliance_b_id']}"
+            except:
+                war['alliance_b_name'] = f"Alliance {war['alliance_b_id']}"
+
+        return {
+            "wars": war_data[:limit],
+            "total_wars": len(war_data),
+            "period": "24h"
+        }
+
+    def get_trade_route_danger_map(self) -> Dict:
+        """
+        Analyze danger levels along major trade routes between hubs.
+
+        Returns routes with danger scores per system based on:
+        - Kill frequency in last 24h
+        - Average ship value destroyed
+        - Gate camp indicators (multi-attacker kills)
+
+        Returns:
+            Dict with routes and danger analysis
+        """
+        # Check cache first
+        cache_key = "report:trade_routes:danger_map"
+        try:
+            cached = self.redis_client.get(cache_key)
+            if cached:
+                print(f"[CACHE HIT] Returning cached trade routes report")
+                return json.loads(cached)
+        except Exception:
+            pass
+
+        route_service = RouteService()
+
+        # Major trade routes (all hub pairs)
+        trade_routes = [
+            ('jita', 'amarr'),
+            ('jita', 'dodixie'),
+            ('jita', 'rens'),
+            ('jita', 'hek'),
+            ('amarr', 'dodixie'),
+            ('amarr', 'rens'),
+            ('amarr', 'hek'),
+            ('dodixie', 'rens'),
+            ('dodixie', 'hek'),
+            ('rens', 'hek'),
+        ]
+
+        # Build system danger scores from Redis data
+        system_danger = {}
+        system_kill_count = {}
+        system_total_isk = {}
+        system_gate_camps = set()
+
+        # Get all system timelines
+        system_keys = list(self.redis_client.scan_iter("kill:system:*:timeline"))
+
+        for system_key in system_keys:
+            # Extract system_id from key
+            parts = system_key.split(":")
+            if len(parts) < 3:
+                continue
+            system_id = int(parts[2])
+
+            # Get kills for this system
+            kill_ids = self.redis_client.zrevrange(system_key, 0, -1)
+            if not kill_ids:
+                continue
+
+            kills = []
+            for kill_id in kill_ids:
+                kill_data = self.redis_client.get(f"kill:id:{kill_id}")
+                if kill_data:
+                    kills.append(json.loads(kill_data))
+
+            if not kills:
+                continue
+
+            # Calculate danger metrics
+            kill_count = len(kills)
+            total_isk = sum(k['ship_value'] for k in kills)
+            avg_isk = total_isk / kill_count if kill_count > 0 else 0
+
+            # Detect gate camps (kills with 4+ attackers)
+            gate_camp_kills = sum(1 for k in kills if k.get('attacker_count', 0) >= 4)
+            gate_camp_ratio = gate_camp_kills / kill_count if kill_count > 0 else 0
+
+            # Danger score calculation (0-100)
+            # - Kill frequency: 0-40 points (1 point per kill, capped at 40)
+            # - Average value: 0-30 points (1 point per 100M ISK, capped at 30)
+            # - Gate camps: 0-30 points (30 points if >20% gate camps)
+            danger_score = min(40, kill_count) + \
+                          min(30, int(avg_isk / 100_000_000)) + \
+                          (30 if gate_camp_ratio > 0.2 else 0)
+
+            system_danger[system_id] = danger_score
+            system_kill_count[system_id] = kill_count
+            system_total_isk[system_id] = total_isk
+
+            if gate_camp_ratio > 0.2:
+                system_gate_camps.add(system_id)
+
+        # Calculate routes with danger analysis
+        routes_data = []
+
+        for from_hub, to_hub in trade_routes:
+            from_system_id = TRADE_HUB_SYSTEMS[from_hub]
+            to_system_id = TRADE_HUB_SYSTEMS[to_hub]
+
+            # Calculate route (HighSec only)
+            route = route_service.find_route(
+                from_system_id,
+                to_system_id,
+                avoid_lowsec=True,
+                avoid_nullsec=True
+            )
+
+            if not route:
+                continue
+
+            # Analyze danger along route
+            route_systems = []
+            total_danger = 0
+            max_danger_system = None
+            max_danger_score = 0
+
+            for system in route:
+                system_id = system['system_id']
+                danger = system_danger.get(system_id, 0)
+                kill_count = system_kill_count.get(system_id, 0)
+                total_isk = system_total_isk.get(system_id, 0)
+                is_gate_camp = system_id in system_gate_camps
+
+                total_danger += danger
+
+                if danger > max_danger_score:
+                    max_danger_score = danger
+                    max_danger_system = system
+
+                route_systems.append({
+                    "system_id": system_id,
+                    "system_name": system['system_name'],
+                    "security": system['security'],
+                    "danger_score": danger,
+                    "kills_24h": kill_count,
+                    "isk_destroyed_24h": total_isk,
+                    "gate_camp_detected": is_gate_camp
+                })
+
+            # Classify route danger level
+            avg_danger = total_danger / len(route_systems) if route_systems else 0
+            if avg_danger >= 50:
+                danger_level = "EXTREME"
+            elif avg_danger >= 30:
+                danger_level = "HIGH"
+            elif avg_danger >= 15:
+                danger_level = "MODERATE"
+            elif avg_danger >= 5:
+                danger_level = "LOW"
+            else:
+                danger_level = "SAFE"
+
+            routes_data.append({
+                "from_hub": from_hub.upper(),
+                "to_hub": to_hub.upper(),
+                "from_system_id": from_system_id,
+                "to_system_id": to_system_id,
+                "total_jumps": len(route_systems),
+                "danger_level": danger_level,
+                "avg_danger_score": round(avg_danger, 1),
+                "total_danger_score": total_danger,
+                "max_danger_system": {
+                    "system_id": max_danger_system['system_id'],
+                    "system_name": max_danger_system['system_name'],
+                    "danger_score": max_danger_score
+                } if max_danger_system else None,
+                "systems": route_systems
+            })
+
+        # Sort by danger level
+        routes_data.sort(key=lambda x: x['avg_danger_score'], reverse=True)
+
+        result = {
+            "timestamp": datetime.now().isoformat(),
+            "routes": routes_data,
+            "total_routes": len(routes_data),
+            "period": "24h",
+            "danger_scale": {
+                "SAFE": "0-5 avg danger",
+                "LOW": "5-15 avg danger",
+                "MODERATE": "15-30 avg danger",
+                "HIGH": "30-50 avg danger",
+                "EXTREME": "50+ avg danger"
+            }
+        }
+
+        # Cache for 7 hours
+        try:
+            self.redis_client.setex(cache_key, REPORT_CACHE_TTL, json.dumps(result))
+            print(f"[CACHE] Cached trade routes report for {REPORT_CACHE_TTL}s")
+        except Exception:
+            pass
+
+        return result
+
+    def get_24h_battle_report(self) -> Dict:
+        """
+        Generate comprehensive 24h battle report by region.
+
+        Cached for 10 minutes to reduce computation load.
+
+        Returns:
+            Dict with regional stats and global summary
+        """
+        # Check cache first
+        cache_key = "battle_report:24h:cache"
+        cached = self.redis_client.get(cache_key)
+        if cached:
+            return json.loads(cached)
+
+        # Generate fresh report
+        # Get all region timelines
+        region_keys = list(self.redis_client.scan_iter("kill:region:*:timeline"))
+
+        regional_stats = []
+        total_kills_global = 0
+        total_isk_global = 0.0
+
+        for region_key in region_keys:
+            # Extract region_id from key
+            parts = region_key.split(":")
+            if len(parts) < 3:
+                continue
+            region_id = int(parts[2])
+
+            # Get all kills for this region
+            kill_ids = self.redis_client.zrevrange(region_key, 0, -1)
+
+            if not kill_ids:
+                continue
+
+            kills = []
+            for kill_id in kill_ids:
+                kill_data = self.redis_client.get(f"kill:id:{kill_id}")
+                if kill_data:
+                    kills.append(json.loads(kill_data))
+
+            if not kills:
+                continue
+
+            # Calculate region stats
+            kill_count = len(kills)
+            total_isk = sum(k['ship_value'] for k in kills)
+            avg_isk = total_isk / kill_count if kill_count > 0 else 0
+
+            # Get top 3 systems
+            system_counts = {}
+            for kill in kills:
+                system_id = kill['solar_system_id']
+                system_counts[system_id] = system_counts.get(system_id, 0) + 1
+            top_systems = sorted(system_counts.items(), key=lambda x: x[1], reverse=True)[:3]
+
+            # Get top 3 ship types
+            ship_counts = {}
+            for kill in kills:
+                ship_id = kill['ship_type_id']
+                ship_counts[ship_id] = ship_counts.get(ship_id, 0) + 1
+            top_ships = sorted(ship_counts.items(), key=lambda x: x[1], reverse=True)[:3]
+
+            # Get top 5 destroyed items/modules
+            item_counts = {}
+            for kill in kills:
+                for item in kill.get('destroyed_items', []):
+                    item_id = item['item_type_id']
+                    quantity = item['quantity']
+                    item_counts[item_id] = item_counts.get(item_id, 0) + quantity
+            top_items = sorted(item_counts.items(), key=lambda x: x[1], reverse=True)[:5]
+
+            # Get region name from DB
+            with get_db_connection() as conn:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        'SELECT "regionName" FROM "mapRegions" WHERE "regionID" = %s',
+                        (region_id,)
+                    )
+                    row = cur.fetchone()
+                    region_name = row[0] if row else f"Region {region_id}"
+
+                    # Get system names
+                    top_systems_with_names = []
+                    for system_id, count in top_systems:
+                        cur.execute(
+                            'SELECT "solarSystemName" FROM "mapSolarSystems" WHERE "solarSystemID" = %s',
+                            (system_id,)
+                        )
+                        row = cur.fetchone()
+                        system_name = row[0] if row else f"System {system_id}"
+                        top_systems_with_names.append({
+                            "system_id": system_id,
+                            "system_name": system_name,
+                            "kills": count
+                        })
+
+                    # Get ship names
+                    top_ships_with_names = []
+                    for ship_id, count in top_ships:
+                        cur.execute(
+                            'SELECT "typeName" FROM "invTypes" WHERE "typeID" = %s',
+                            (ship_id,)
+                        )
+                        row = cur.fetchone()
+                        ship_name = row[0] if row else f"Ship {ship_id}"
+                        top_ships_with_names.append({
+                            "ship_type_id": ship_id,
+                            "ship_name": ship_name,
+                            "losses": count
+                        })
+
+                    # Get item/module names
+                    top_items_with_names = []
+                    for item_id, quantity in top_items:
+                        cur.execute(
+                            'SELECT "typeName" FROM "invTypes" WHERE "typeID" = %s',
+                            (item_id,)
+                        )
+                        row = cur.fetchone()
+                        item_name = row[0] if row else f"Item {item_id}"
+                        top_items_with_names.append({
+                            "item_type_id": item_id,
+                            "item_name": item_name,
+                            "quantity_destroyed": quantity
+                        })
+
+            regional_stats.append({
+                "region_id": region_id,
+                "region_name": region_name,
+                "kills": kill_count,
+                "total_isk_destroyed": total_isk,
+                "avg_kill_value": avg_isk,
+                "top_systems": top_systems_with_names,
+                "top_ships": top_ships_with_names,
+                "top_destroyed_items": top_items_with_names
+            })
+
+            total_kills_global += kill_count
+            total_isk_global += total_isk
+
+        # Sort regions by kills descending
+        regional_stats.sort(key=lambda x: x['kills'], reverse=True)
+
+        # Find most active and most expensive regions
+        most_active_region = regional_stats[0] if regional_stats else None
+        most_expensive_region = max(regional_stats, key=lambda x: x['total_isk_destroyed']) if regional_stats else None
+
+        report = {
+            "period": "24h",
+            "global": {
+                "total_kills": total_kills_global,
+                "total_isk_destroyed": total_isk_global,
+                "most_active_region": most_active_region['region_name'] if most_active_region else None,
+                "most_expensive_region": most_expensive_region['region_name'] if most_expensive_region else None
+            },
+            "regions": regional_stats
+        }
+
+        # Cache report for 7 hours (regenerated every 6h by cron)
+        self.redis_client.setex(cache_key, REPORT_CACHE_TTL, json.dumps(report))
+
+        return report
+
+    async def detect_coalitions(self, days: int = 7, min_fights_together: int = 5, minutes: int = None) -> Dict:
+        """
+        Power Bloc detection based on pre-computed combat patterns.
+
+        Uses the scheduler-maintained alliance_fight_together/against tables
+        which have proper filtering (excludes MTUs, Capsules, etc.).
+
+        Coalition logic:
+        - Alliances that fight TOGETHER at least 3x more than AGAINST each other
+        - Large solo alliances (activity >= 1000) are their own Power Bloc
+        - Named after the largest alliance in each group
+
+        Args:
+            days: How many days of data to analyze (for stats, relationships use 90-day tables)
+            min_fights_together: Minimum shared kills (legacy param, tables use 200+)
+            minutes: Optional minutes parameter for more precise timeframe (overrides days for stats)
+
+        Returns:
+            Dict with detected coalitions and their aggregated stats
+        """
+        # Use minutes if provided, otherwise convert days to minutes
+        stats_minutes = minutes if minutes is not None else days * 1440
+        cache_key = f"coalitions:detected:{stats_minutes}m:v3"
+        cached = self.redis_client.get(cache_key)
+        if cached:
+            return json.loads(cached)
+
+        # Constants for coalition detection
+        MIN_TOGETHER_RATIO = 2.0  # Must fight together 2x more (weighted) than against
+        MIN_SOLO_ACTIVITY = 1000  # Solo alliances with this much activity = own Power Bloc
+
+        try:
+            with get_db_connection() as conn:
+                with conn.cursor() as cur:
+                    # Step 1: Get alliance pairs with time-weighted scores
+                    cur.execute("""
+                        SELECT
+                            t.alliance_a,
+                            t.alliance_b,
+                            t.fights_together,
+                            COALESCE(t.weighted_together, t.fights_together) as weighted_together,
+                            COALESCE(t.recent_together, 0) as recent_together,
+                            COALESCE(a.fights_against, 0) as fights_against,
+                            COALESCE(a.weighted_against, a.fights_against, 0) as weighted_against,
+                            COALESCE(a.recent_against, 0) as recent_against
+                        FROM alliance_fight_together t
+                        LEFT JOIN alliance_fight_against a
+                            ON t.alliance_a = a.alliance_a AND t.alliance_b = a.alliance_b
+                        WHERE t.fights_together >= 200
+                        ORDER BY COALESCE(t.weighted_together, t.fights_together) DESC
+                    """)
+                    fight_pairs = cur.fetchall()
+
+                    # Step 2: Get alliance activity from pre-computed table
+                    cur.execute("""
+                        SELECT alliance_id, total_kills
+                        FROM alliance_activity_total
+                        WHERE total_kills >= 50
+                        ORDER BY total_kills DESC
+                    """)
+                    alliance_activity = {row[0]: row[1] for row in cur.fetchall()}
+
+                    # Step 3: Build confirmed enemies map (time-weighted threshold)
+                    cur.execute("""
+                        SELECT alliance_a, alliance_b,
+                               COALESCE(weighted_against, fights_against) as weighted_against,
+                               COALESCE(recent_against, 0) as recent_against
+                        FROM alliance_fight_against
+                        WHERE COALESCE(weighted_against, fights_against) >= 30
+                    """)
+                    confirmed_enemies = set()
+                    enemy_recent = {}
+                    for row in cur.fetchall():
+                        confirmed_enemies.add((row[0], row[1]))
+                        confirmed_enemies.add((row[1], row[0]))
+                        pair = (min(row[0], row[1]), max(row[0], row[1]))
+                        enemy_recent[pair] = row[3]  # recent_against
+
+                    # Step 4: Build coalition clusters using Union-Find
+                    parent = {}
+                    coalition_members = {}  # Track members for enemy checking
+
+                    def find(x):
+                        if x not in parent:
+                            parent[x] = x
+                            coalition_members[x] = {x}
+                        if parent[x] != x:
+                            parent[x] = find(parent[x])
+                        return parent[x]
+
+                    def safe_union(x, y):
+                        """Union only if no members are actively hostile enemies"""
+                        px, py = find(x), find(y)
+                        if px == py:
+                            return  # Already in same coalition
+
+                        members_x = coalition_members.get(px, {px})
+                        members_y = coalition_members.get(py, {py})
+
+                        for mx in members_x:
+                            for my in members_y:
+                                if (mx, my) in confirmed_enemies:
+                                    # Check if still actively hostile (recent data)
+                                    pair = (min(mx, my), max(mx, my))
+                                    recent = enemy_recent.get(pair, 999)
+                                    if recent > 75:  # Still actively hostile
+                                        return
+
+                        # Safe to merge - most active becomes leader
+                        if alliance_activity.get(px, 0) >= alliance_activity.get(py, 0):
+                            parent[py] = px
+                            coalition_members[px] = members_x | members_y
+                        else:
+                            parent[px] = py
+                            coalition_members[py] = members_x | members_y
+
+                    # Filter to true coalition partners using weighted ratio + trend
+                    coalition_pairs = []
+                    for row in fight_pairs:
+                        a, b = row[0], row[1]
+                        together = row[2]
+                        w_together = row[3]  # weighted_together
+                        recent_t = row[4]    # recent_together
+                        w_against = row[6]   # weighted_against
+                        recent_a = row[7]    # recent_against
+
+                        # Trend override: recent data overwhelmingly positive
+                        trend_override = (recent_t >= 100 and recent_a <= 75)
+
+                        if not trend_override:
+                            if w_against > 0 and w_together / w_against < MIN_TOGETHER_RATIO:
+                                continue
+
+                        # Calculate strength based on co-occurrence
+                        activity_a = alliance_activity.get(a, 0)
+                        activity_b = alliance_activity.get(b, 0)
+                        ratio_a = together / activity_a if activity_a > 0 else 0
+                        ratio_b = together / activity_b if activity_b > 0 else 0
+
+                        # At least one side should have 10%+ co-occurrence
+                        if ratio_a >= 0.10 or ratio_b >= 0.10:
+                            strength = together * max(ratio_a, ratio_b)
+                            coalition_pairs.append((a, b, strength, together))
+
+                    # Sort by strength and merge (respecting enemy relationships)
+                    coalition_pairs.sort(key=lambda x: x[2], reverse=True)
+                    for a, b, strength, fights in coalition_pairs:
+                        safe_union(a, b)
+
+                    # Post-processing: Remove alliances that still actively fight their leader
+                    cur.execute("""
+                        SELECT alliance_a, alliance_b,
+                               COALESCE(weighted_against, fights_against) as weighted_against
+                        FROM alliance_fight_against
+                        WHERE COALESCE(weighted_against, fights_against) >= 15
+                    """)
+                    enemy_pairs = {(row[0], row[1]): row[2] for row in cur.fetchall()}
+
+                    for alliance_id in list(parent.keys()):
+                        leader = find(alliance_id)
+                        if leader == alliance_id:
+                            continue
+
+                        pair = (min(alliance_id, leader), max(alliance_id, leader))
+                        fights_against = enemy_pairs.get(pair, 0)
+
+                        # Check fights_together for this pair
+                        fights_together = 0
+                        for a, b, _, t in coalition_pairs:
+                            if (min(a, b), max(a, b)) == pair:
+                                fights_together = t
+                                break
+
+                        # If they fight against more than together, make independent
+                        if fights_against > 0 and (fights_together == 0 or fights_together / fights_against < MIN_TOGETHER_RATIO):
+                            parent[alliance_id] = alliance_id
+
+                    # Step 4: Group alliances by coalition root
+                    coalitions_raw = {}
+                    for alliance_id in alliance_activity.keys():
+                        root = find(alliance_id)
+                        if root not in coalitions_raw:
+                            coalitions_raw[root] = []
+                        coalitions_raw[root].append(alliance_id)
+
+                    # Step 5: Build final coalition data
+                    coalitions = []
+                    unaffiliated = []
+
+                    for root, members in coalitions_raw.items():
+                        # Sort members by activity, largest first
+                        members.sort(key=lambda x: alliance_activity.get(x, 0), reverse=True)
+                        total_activity = sum(alliance_activity.get(m, 0) for m in members)
+
+                        if len(members) < 2:
+                            # Single alliance - include as Power Bloc if large enough
+                            if total_activity >= MIN_SOLO_ACTIVITY:
+                                # Large solo alliance = its own Power Bloc
+                                leader_name = await self.get_alliance_name(members[0])
+
+                                # Get stats for this single alliance
+                                cur.execute("""
+                                    SELECT
+                                        COUNT(*) as total_kills,
+                                        COALESCE(SUM(ship_value), 0) as isk_destroyed
+                                    FROM killmails
+                                    WHERE killmail_time >= NOW() - INTERVAL '%s minutes'
+                                      AND final_blow_alliance_id = %s
+                                """, (stats_minutes, members[0]))
+                                kills_result = cur.fetchone()
+
+                                cur.execute("""
+                                    SELECT
+                                        COUNT(*) as total_losses,
+                                        COALESCE(SUM(ship_value), 0) as isk_lost
+                                    FROM killmails
+                                    WHERE killmail_time >= NOW() - INTERVAL '%s minutes'
+                                      AND victim_alliance_id = %s
+                                """, (stats_minutes, members[0]))
+                                losses_result = cur.fetchone()
+
+                                total_kills = kills_result[0] if kills_result else 0
+                                isk_destroyed = int(kills_result[1]) if kills_result else 0
+                                total_losses = losses_result[0] if losses_result else 0
+                                isk_lost = int(losses_result[1]) if losses_result else 0
+                                efficiency = (isk_destroyed / (isk_destroyed + isk_lost) * 100) if (isk_destroyed + isk_lost) > 0 else 50
+
+                                coalitions.append({
+                                    "name": leader_name,  # Solo = just the name, no "Coalition"
+                                    "leader_alliance_id": members[0],
+                                    "leader_name": leader_name,
+                                    "member_count": 1,
+                                    "members": [{
+                                        "alliance_id": members[0],
+                                        "name": leader_name,
+                                        "activity": total_activity
+                                    }],
+                                    "total_kills": total_kills,
+                                    "total_losses": total_losses,
+                                    "isk_destroyed": isk_destroyed,
+                                    "isk_lost": isk_lost,
+                                    "efficiency": round(efficiency, 1),
+                                    "total_activity": total_activity
+                                })
+                            else:
+                                unaffiliated.extend(members)
+                            continue
+
+                        # Multi-member coalition
+                        leader_name = await self.get_alliance_name(members[0])
+
+                        # Get coalition aggregate stats
+                        member_ids = tuple(members[:50])
+                        cur.execute("""
+                            SELECT
+                                COUNT(*) as total_kills,
+                                COALESCE(SUM(ship_value), 0) as isk_destroyed
+                            FROM killmails
+                            WHERE killmail_time >= NOW() - INTERVAL '%s minutes'
+                              AND final_blow_alliance_id IN %s
+                        """, (stats_minutes, member_ids))
+                        kills_result = cur.fetchone()
+
+                        cur.execute("""
+                            SELECT
+                                COUNT(*) as total_losses,
+                                COALESCE(SUM(ship_value), 0) as isk_lost
+                            FROM killmails
+                            WHERE killmail_time >= NOW() - INTERVAL '%s minutes'
+                              AND victim_alliance_id IN %s
+                        """, (stats_minutes, member_ids))
+                        losses_result = cur.fetchone()
+
+                        total_kills = kills_result[0] if kills_result else 0
+                        isk_destroyed = int(kills_result[1]) if kills_result else 0
+                        total_losses = losses_result[0] if losses_result else 0
+                        isk_lost = int(losses_result[1]) if losses_result else 0
+                        efficiency = (isk_destroyed / (isk_destroyed + isk_lost) * 100) if (isk_destroyed + isk_lost) > 0 else 50
+
+                        # Get member names
+                        member_names = []
+                        for member_id in members[:10]:
+                            name = await self.get_alliance_name(member_id)
+                            member_names.append({
+                                "alliance_id": member_id,
+                                "name": name,
+                                "activity": alliance_activity.get(member_id, 0)
+                            })
+
+                        coalitions.append({
+                            "name": f"{leader_name} Coalition",
+                            "leader_alliance_id": members[0],
+                            "leader_name": leader_name,
+                            "member_count": len(members),
+                            "members": member_names,
+                            "total_kills": total_kills,
+                            "total_losses": total_losses,
+                            "isk_destroyed": isk_destroyed,
+                            "isk_lost": isk_lost,
+                            "efficiency": round(efficiency, 1),
+                            "total_activity": total_activity
+                        })
+
+                    # Sort coalitions by activity
+                    coalitions.sort(key=lambda x: x['total_activity'], reverse=True)
+
+                    # Build unaffiliated summary (smaller alliances)
+                    unaffiliated.sort(key=lambda x: alliance_activity.get(x, 0), reverse=True)
+                    unaffiliated_data = []
+                    for alliance_id in unaffiliated[:10]:
+                        name = await self.get_alliance_name(alliance_id)
+
+                        cur.execute("""
+                            SELECT COUNT(*) as kills
+                            FROM killmail_attackers ka
+                            JOIN killmails k ON k.killmail_id = ka.killmail_id
+                            WHERE k.killmail_time >= NOW() - INTERVAL '%s minutes'
+                              AND ka.alliance_id = %s
+                        """, (stats_minutes, alliance_id))
+                        kills = cur.fetchone()[0]
+
+                        cur.execute("""
+                            SELECT COUNT(*) as losses, COALESCE(SUM(ship_value), 0) as isk_lost
+                            FROM killmails
+                            WHERE killmail_time >= NOW() - INTERVAL '%s minutes'
+                              AND victim_alliance_id = %s
+                        """, (stats_minutes, alliance_id))
+                        loss_result = cur.fetchone()
+
+                        unaffiliated_data.append({
+                            "alliance_id": alliance_id,
+                            "name": name,
+                            "kills": kills,
+                            "losses": loss_result[0],
+                            "isk_lost": int(loss_result[1]),
+                            "activity": alliance_activity.get(alliance_id, 0)
+                        })
+
+                    result = {
+                        "period_days": days,
+                        "minutes": stats_minutes,
+                        "coalitions": coalitions[:10],  # Top 10 Power Blocs
+                        "unaffiliated": unaffiliated_data,
+                        "total_coalitions_detected": len(coalitions),
+                        "total_unaffiliated": len(unaffiliated),
+                        "generated_at": datetime.utcnow().isoformat() + "Z"
+                    }
+
+                    # Cache for 7 hours (regenerated every 6h by cron)
+                    self.redis_client.setex(cache_key, REPORT_CACHE_TTL, json.dumps(result))
+
+                    return result
+
+        except Exception as e:
+            print(f"Error detecting coalitions: {e}")
+            import traceback
+            traceback.print_exc()
+            return {
+                "period_days": days,
+                "coalitions": [],
+                "unaffiliated": [],
+                "error": str(e)
+            }
+
+    def _detect_doctrines(self, top_hulls: List[Dict], total_ships: int) -> List[str]:
+        """
+        Detect fleet doctrines based on hull type patterns.
+
+        Known EVE Online doctrines detected:
+        - Ferox Fleet (Shield Battlecruiser)
+        - Muninn Fleet (Armor HAC)
+        - Eagle Fleet (Shield HAC)
+        - Caracal Fleet (Shield Cruiser)
+        - Jackdaw Fleet (Tactical Destroyer)
+        - Bomber Fleet (Stealth Bombers)
+        - Capital Brawl (Dreads/Carriers)
+        """
+        hints = []
+        hull_names = {h["ship_name"].lower(): h for h in top_hulls}
+        hull_counts = {h["ship_name"]: h["losses"] for h in top_hulls}
+
+        # Known doctrine ships and their detection thresholds
+        doctrine_patterns = {
+            # Battlecruiser doctrines
+            "ferox": ("Ferox Fleet", "battlecruiser", 15),
+            "hurricane": ("Hurricane Fleet", "battlecruiser", 15),
+            "brutix": ("Brutix Fleet", "battlecruiser", 10),
+            "harbinger": ("Harbinger Fleet", "battlecruiser", 10),
+            "drake": ("Drake Fleet", "battlecruiser", 15),
+
+            # HAC doctrines
+            "muninn": ("Muninn Fleet (Armor HAC)", "cruiser", 10),
+            "eagle": ("Eagle Fleet (Shield HAC)", "cruiser", 10),
+            "cerberus": ("Cerberus Fleet (Missile HAC)", "cruiser", 10),
+            "sacrilege": ("Sacrilege Fleet (Armor HAC)", "cruiser", 8),
+            "zealot": ("Zealot Fleet (Armor HAC)", "cruiser", 8),
+            "ishtar": ("Ishtar Fleet (Drone HAC)", "cruiser", 10),
+            "deimos": ("Deimos Fleet (Armor HAC)", "cruiser", 8),
+            "vagabond": ("Vagabond Gang (Kiting HAC)", "cruiser", 5),
+
+            # Cruiser doctrines
+            "caracal": ("Caracal Fleet (Missile Cruiser)", "cruiser", 15),
+            "moa": ("Moa Fleet (Shield Cruiser)", "cruiser", 10),
+            "vexor": ("Vexor Fleet (Drone Cruiser)", "cruiser", 15),
+            "thorax": ("Thorax Fleet (Blaster Cruiser)", "cruiser", 10),
+            "omen": ("Omen Fleet (Laser Cruiser)", "cruiser", 10),
+            "rupture": ("Rupture Fleet (Projectile Cruiser)", "cruiser", 10),
+
+            # Destroyer doctrines
+            "jackdaw": ("Jackdaw Fleet (T3 Destroyer)", "destroyer", 10),
+            "hecate": ("Hecate Fleet (T3 Destroyer)", "destroyer", 8),
+            "confessor": ("Confessor Fleet (T3 Destroyer)", "destroyer", 8),
+            "svipul": ("Svipul Fleet (T3 Destroyer)", "destroyer", 8),
+            "cormorant": ("Cormorant Fleet (Rail Destroyer)", "destroyer", 15),
+            "catalyst": ("Catalyst Gang (Gankers)", "destroyer", 20),
+            "thrasher": ("Thrasher Fleet (Arty Destroyer)", "destroyer", 15),
+            "coercer": ("Coercer Fleet (Beam Destroyer)", "destroyer", 15),
+            "kikimora": ("Kikimora Fleet (Trig Destroyer)", "destroyer", 10),
+
+            # Stealth Bomber doctrines
+            "manticore": ("Bomber Fleet", "frigate", 5),
+            "purifier": ("Bomber Fleet", "frigate", 5),
+            "hound": ("Bomber Fleet", "frigate", 5),
+            "nemesis": ("Bomber Fleet", "frigate", 5),
+
+            # Interdictor presence (indicates fleet fights)
+            "sabre": ("Interdictor Support", "destroyer", 8),
+            "flycatcher": ("Interdictor Support", "destroyer", 8),
+
+            # Capital presence
+            "revelation": ("Capital Brawl (Dreadnoughts)", "dreadnought", 3),
+            "naglfar": ("Capital Brawl (Dreadnoughts)", "dreadnought", 3),
+            "moros": ("Capital Brawl (Dreadnoughts)", "dreadnought", 3),
+            "phoenix": ("Capital Brawl (Dreadnoughts)", "dreadnought", 3),
+            "thanatos": ("Carrier Operations", "carrier", 2),
+            "nidhoggur": ("Carrier Operations", "carrier", 2),
+            "archon": ("Carrier Operations", "carrier", 2),
+            "chimera": ("Carrier Operations", "carrier", 2),
+
+            # Logistics (indicates organized fleet)
+            "scimitar": ("Logistics Supported", "cruiser", 5),
+            "basilisk": ("Logistics Supported", "cruiser", 5),
+            "guardian": ("Logistics Supported", "cruiser", 5),
+            "oneiros": ("Logistics Supported", "cruiser", 5),
+            "exequror navy issue": ("Navy Logi Supported", "cruiser", 8),
+        }
+
+        detected = set()
+        for ship_key, (doctrine_name, expected_class, min_count) in doctrine_patterns.items():
+            # Check for exact match or partial match
+            for hull_name, hull_data in hull_names.items():
+                if ship_key in hull_name and hull_data["losses"] >= min_count:
+                    if doctrine_name not in detected:
+                        detected.add(doctrine_name)
+                        count = hull_data["losses"]
+                        hints.append(f"{doctrine_name} ({count} ships)")
+
+        # Detect mixed doctrines based on ship class dominance
+        class_counts = {}
+        for h in top_hulls:
+            sc = h["ship_class"]
+            class_counts[sc] = class_counts.get(sc, 0) + h["losses"]
+
+        if not hints:
+            # Fallback to class-based detection if no specific doctrine found
+            for ship_class, count in sorted(class_counts.items(), key=lambda x: x[1], reverse=True):
+                pct = (count / total_ships) * 100 if total_ships > 0 else 0
+                if ship_class == "battlecruiser" and pct > 25:
+                    hints.append(f"Battlecruiser Doctrine ({count} ships, {pct:.0f}%)")
+                elif ship_class == "cruiser" and pct > 30:
+                    hints.append(f"Cruiser Gang ({count} ships, {pct:.0f}%)")
+                elif ship_class == "destroyer" and pct > 30:
+                    hints.append(f"Destroyer Swarm ({count} ships, {pct:.0f}%)")
+                elif ship_class == "frigate" and pct > 35:
+                    hints.append(f"Frigate Blob ({count} ships, {pct:.0f}%)")
+
+        return hints[:4]  # Max 4 doctrine hints
+
+    def get_war_economy_report(self, limit: int = 10) -> Dict:
+        """
+        Generate War Economy report combining combat data with market intelligence.
+
+        Provides:
+        - Regional Demand: Where combat is happening → where market demand rises
+        - Hot Items: Top destroyed items with market prices
+        - Fleet Compositions: Ship class breakdown by region (doctrine detection)
+        - Market Opportunities: Items with highest demand from combat
+
+        Args:
+            limit: Number of items/regions to return per section
+
+        Returns:
+            Dict with war economy intelligence
+        """
+        cache_key = "war_economy:report:cache"
+        cached = self.redis_client.get(cache_key)
+        if cached:
+            return json.loads(cached)
+
+        result = {
+            "timestamp": datetime.now().isoformat(),
+            "period": "24h",
+            "regional_demand": [],
+            "hot_items": [],
+            "fleet_compositions": [],
+            "global_summary": {}
+        }
+
+        try:
+            # Get profiteering data for hot items
+            profiteering = self.get_war_profiteering_report(limit=limit * 2)
+            result["hot_items"] = profiteering.get("items", [])[:limit]
+
+            # Get regional combat data with destroyed items
+            regional_data = {}
+            region_ship_classes = {}
+
+            # Scan all region timelines
+            for key in self.redis_client.scan_iter("kill:region:*:timeline"):
+                parts = key.split(":")
+                if len(parts) < 3:
+                    continue
+                region_id = int(parts[2])
+
+                # Get kills for this region
+                kill_ids = self.redis_client.zrevrange(key, 0, -1)
+                if not kill_ids:
+                    continue
+
+                kills = []
+                for kill_id in kill_ids:
+                    kill_data = self.redis_client.get(f"kill:id:{kill_id}")
+                    if kill_data:
+                        kills.append(json.loads(kill_data))
+
+                if not kills:
+                    continue
+
+                # Calculate regional stats
+                kill_count = len(kills)
+                total_isk = sum(k.get('ship_value', 0) for k in kills)
+
+                # Track destroyed items in this region
+                region_items = {}
+                for kill in kills:
+                    for item in kill.get('destroyed_items', []):
+                        item_id = item['item_type_id']
+                        quantity = item['quantity']
+                        region_items[item_id] = region_items.get(item_id, 0) + quantity
+
+                # Track ship classes (for doctrine detection)
+                ship_class_counts = {}
+                for kill in kills:
+                    ship_class = self.get_ship_class(kill.get('ship_type_id', 0))
+                    if ship_class:
+                        ship_class_counts[ship_class] = ship_class_counts.get(ship_class, 0) + 1
+
+                regional_data[region_id] = {
+                    "region_id": region_id,
+                    "kills": kill_count,
+                    "isk_destroyed": total_isk,
+                    "destroyed_items": region_items,
+                    "ship_classes": ship_class_counts
+                }
+
+            if not regional_data:
+                # Return empty result with valid structure
+                result["global_summary"] = {
+                    "total_regions_active": 0,
+                    "total_kills_24h": 0,
+                    "total_isk_destroyed": 0,
+                    "hottest_region": None
+                }
+                return result
+
+            # Enrich with region names and calculate top items per region
+            with get_db_connection() as conn:
+                with conn.cursor() as cur:
+                    # Get region names
+                    region_ids = list(regional_data.keys())
+                    cur.execute(
+                        '''SELECT "regionID", "regionName" FROM "mapRegions" WHERE "regionID" = ANY(%s)''',
+                        (region_ids,)
+                    )
+                    region_names = {row[0]: row[1] for row in cur.fetchall()}
+
+                    # Get all unique item IDs for price lookup
+                    all_item_ids = set()
+                    for data in regional_data.values():
+                        all_item_ids.update(data["destroyed_items"].keys())
+
+                    # Batch query for item names and prices
+                    item_info = {}
+                    if all_item_ids:
+                        cur.execute(
+                            '''SELECT
+                                t."typeID",
+                                t."typeName",
+                                g."categoryID",
+                                COALESCE(mp.lowest_sell, mpc.adjusted_price, t."basePrice"::double precision, 0) as price
+                            FROM "invTypes" t
+                            JOIN "invGroups" g ON t."groupID" = g."groupID"
+                            LEFT JOIN market_prices mp ON t."typeID" = mp.type_id AND mp.region_id = 10000002
+                            LEFT JOIN market_prices_cache mpc ON t."typeID" = mpc.type_id
+                            WHERE t."typeID" = ANY(%s)''',
+                            (list(all_item_ids),)
+                        )
+                        for row in cur.fetchall():
+                            # Exclude raw materials (category 4, 25, 43)
+                            if row[2] not in (4, 25, 43):
+                                item_info[row[0]] = {
+                                    "name": row[1],
+                                    "price": float(row[3]) if row[3] else 0
+                                }
+
+            # Build regional demand list
+            regional_demand = []
+            for region_id, data in regional_data.items():
+                region_name = region_names.get(region_id, f"Region {region_id}")
+
+                # Get top 5 items for this region with market value
+                top_items = []
+                for item_id, quantity in sorted(
+                    data["destroyed_items"].items(),
+                    key=lambda x: x[1],
+                    reverse=True
+                )[:5]:
+                    if item_id in item_info:
+                        info = item_info[item_id]
+                        top_items.append({
+                            "item_type_id": item_id,
+                            "item_name": info["name"],
+                            "quantity_destroyed": quantity,
+                            "market_price": info["price"],
+                            "demand_value": quantity * info["price"]
+                        })
+
+                regional_demand.append({
+                    "region_id": region_id,
+                    "region_name": region_name,
+                    "kills": data["kills"],
+                    "isk_destroyed": data["isk_destroyed"],
+                    "top_demanded_items": top_items,
+                    "ship_classes": data["ship_classes"],
+                    "demand_score": sum(i["demand_value"] for i in top_items)
+                })
+
+            # Sort by demand score (highest opportunity first)
+            regional_demand.sort(key=lambda x: x["demand_score"], reverse=True)
+            result["regional_demand"] = regional_demand[:limit]
+
+            # Build fleet compositions (doctrine detection) per region
+            # Now using specific hull types instead of generic ship classes
+            fleet_compositions = []
+
+            with get_db_connection() as conn:
+                with conn.cursor() as cur:
+                    # Get top 5 combat regions by kills
+                    top_region_ids = [rd["region_id"] for rd in result["regional_demand"][:5]]
+
+                    if top_region_ids:
+                        # Query specific hull types per region (excluding noise)
+                        cur.execute("""
+                            SELECT
+                                k.region_id,
+                                k.ship_type_id,
+                                t."typeName" as ship_name,
+                                k.ship_class,
+                                g."groupName" as ship_group,
+                                COUNT(*) as losses
+                            FROM killmails k
+                            JOIN "invTypes" t ON k.ship_type_id = t."typeID"
+                            JOIN "invGroups" g ON t."groupID" = g."groupID"
+                            WHERE k.killmail_time > NOW() - INTERVAL '24 hours'
+                              AND k.region_id = ANY(%s)
+                              AND k.ship_class NOT IN ('capsule', 'shuttle', 'corvette', 'other')
+                            GROUP BY k.region_id, k.ship_type_id, t."typeName", k.ship_class, g."groupName"
+                            ORDER BY k.region_id, losses DESC
+                        """, (top_region_ids,))
+
+                        # Group by region
+                        region_hulls = {}
+                        for row in cur.fetchall():
+                            region_id, ship_type_id, ship_name, ship_class, ship_group, losses = row
+                            if region_id not in region_hulls:
+                                region_hulls[region_id] = []
+                            region_hulls[region_id].append({
+                                "ship_type_id": ship_type_id,
+                                "ship_name": ship_name,
+                                "ship_class": ship_class,
+                                "ship_group": ship_group,
+                                "losses": losses
+                            })
+
+                        # Build composition for each region
+                        for rd in result["regional_demand"][:5]:
+                            region_id = rd["region_id"]
+                            hulls = region_hulls.get(region_id, [])
+
+                            if not hulls:
+                                continue
+
+                            total_ships = sum(h["losses"] for h in hulls)
+                            top_hulls = hulls[:8]  # Top 8 hull types
+
+                            # Detect doctrines based on hull patterns
+                            doctrine_hints = self._detect_doctrines(top_hulls, total_ships)
+
+                            # Group by ship class for summary
+                            class_breakdown = {}
+                            for h in hulls:
+                                sc = h["ship_class"]
+                                if sc not in class_breakdown:
+                                    class_breakdown[sc] = 0
+                                class_breakdown[sc] += h["losses"]
+
+                            composition = {
+                                "region_id": region_id,
+                                "region_name": rd["region_name"],
+                                "total_ships_lost": total_ships,
+                                "top_hulls": [
+                                    {
+                                        "ship_name": h["ship_name"],
+                                        "ship_class": h["ship_class"],
+                                        "losses": h["losses"],
+                                        "percentage": round((h["losses"] / total_ships) * 100, 1)
+                                    }
+                                    for h in top_hulls
+                                ],
+                                "class_summary": {
+                                    k: {"count": v, "percentage": round((v / total_ships) * 100, 1)}
+                                    for k, v in sorted(class_breakdown.items(), key=lambda x: x[1], reverse=True)[:6]
+                                },
+                                "doctrine_hints": doctrine_hints
+                            }
+                            fleet_compositions.append(composition)
+
+            result["fleet_compositions"] = fleet_compositions
+
+            # Global summary
+            total_kills = sum(rd["kills"] for rd in result["regional_demand"])
+            total_isk = sum(rd["isk_destroyed"] for rd in result["regional_demand"])
+            hottest = result["regional_demand"][0] if result["regional_demand"] else None
+
+            result["global_summary"] = {
+                "total_regions_active": len(regional_data),
+                "total_kills_24h": total_kills,
+                "total_isk_destroyed": total_isk,
+                "hottest_region": {
+                    "region_id": hottest["region_id"],
+                    "region_name": hottest["region_name"],
+                    "kills": hottest["kills"]
+                } if hottest else None,
+                "total_opportunity_value": sum(i.get("opportunity_value", 0) for i in result["hot_items"])
+            }
+
+            # Cache for 7 hours (regenerated every 6h by cron)
+            self.redis_client.setex(cache_key, REPORT_CACHE_TTL, json.dumps(result))
+
+            return result
+
+        except Exception as e:
+            print(f"Error generating war economy report: {e}")
+            import traceback
+            traceback.print_exc()
+            result["error"] = str(e)
+            return result

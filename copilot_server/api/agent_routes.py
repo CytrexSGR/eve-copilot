@@ -1,0 +1,680 @@
+"""
+Agent API Routes
+REST endpoints for agent runtime.
+Uses dependency injection for services.
+"""
+
+import asyncio
+import logging
+from datetime import datetime
+from fastapi import APIRouter, HTTPException, WebSocket, WebSocketDisconnect, Header, Depends
+from fastapi.responses import StreamingResponse
+from pydantic import BaseModel
+from typing import Optional, List, Dict, Any
+
+from ..agent.sessions import AgentSessionManager
+from ..agent.runtime import AgentRuntime
+from ..agent.models import SessionStatus, PlanStatus
+from ..agent.events import AgentEvent
+from ..agent.messages import AgentMessage, MessageRepository
+from ..agent.streaming import SSEFormatter, stream_llm_response
+from ..agent.agentic_loop import AgenticStreamingLoop
+from ..models.user_settings import get_default_settings
+from ..services.chat_service import ChatService
+from ..core.context import get_app_context, AppContext
+from ..core.exceptions import SessionNotFoundError, ServiceNotInitializedError
+from .middleware import verify_session_access, validate_message_content
+from ..config import SYSTEM_PROMPT
+
+logger = logging.getLogger(__name__)
+
+router = APIRouter(prefix="/api/agent", tags=["agent"])
+
+
+# Dependency injection functions
+def get_context() -> AppContext:
+    """Get application context. Returns None if not initialized."""
+    try:
+        from ..core.context import _app_context
+        return _app_context
+    except Exception:
+        return None
+
+
+def get_chat_service(ctx: AppContext = Depends(get_context)) -> ChatService:
+    """Dependency to get ChatService."""
+    if ctx is None or not ctx.is_initialized:
+        raise ServiceNotInitializedError("Application services not initialized")
+    return ChatService(
+        session_manager=ctx.session_manager,
+        runtime=ctx.agent_runtime,
+        db_pool=ctx.db_pool,
+        llm_client=ctx.llm_client,
+        mcp_client=ctx.mcp_client
+    )
+
+
+# Keep legacy globals for backward compatibility during migration
+# These will be removed after full migration
+session_manager: Optional[AgentSessionManager] = None
+runtime: Optional[AgentRuntime] = None
+db_pool = None
+llm_client = None
+mcp_client = None
+
+
+class ChatRequest(BaseModel):
+    """Chat request."""
+    message: str
+    session_id: Optional[str] = None
+    character_id: int
+
+
+class ChatResponse(BaseModel):
+    """Chat response."""
+    session_id: str
+    status: str
+
+
+class ExecuteRequest(BaseModel):
+    """Request to execute pending plan."""
+    session_id: str
+    plan_id: str
+
+
+class RejectRequest(BaseModel):
+    """Request to reject pending plan."""
+    session_id: str
+    plan_id: str
+
+
+class ChatHistoryResponse(BaseModel):
+    """Chat history response."""
+    session_id: str
+    messages: List[Dict[str, Any]]
+    message_count: int
+
+
+class ChatStreamRequest(BaseModel):
+    """Request to stream chat response."""
+    message: str
+    session_id: str
+    character_id: int
+
+
+class SessionCreateRequest(BaseModel):
+    """Request to create new session."""
+    character_id: Optional[int] = None
+    autonomy_level: int = 1
+
+
+class SessionCreateResponse(BaseModel):
+    """Session creation response."""
+    session_id: str
+    character_id: Optional[int]
+    autonomy_level: int
+    status: str
+
+
+@router.post("/session", response_model=SessionCreateResponse)
+async def create_session(
+    request: SessionCreateRequest,
+    ctx: AppContext = Depends(get_context)
+):
+    """Create new agent session."""
+    # Use context if available, else fall back to globals
+    mgr = ctx.session_manager if ctx and ctx.is_initialized else session_manager
+
+    if mgr is None:
+        raise HTTPException(status_code=503, detail="Session manager not initialized")
+
+    session = await mgr.create_session(
+        character_id=request.character_id or -1,
+        autonomy_level=request.autonomy_level
+    )
+
+    return SessionCreateResponse(
+        session_id=session.id,
+        character_id=session.character_id,
+        autonomy_level=session.autonomy_level,
+        status=session.status.value
+    )
+
+
+@router.post("/chat", response_model=ChatResponse)
+async def agent_chat(
+    request: ChatRequest,
+    authorization: Optional[str] = Header(None),
+    ctx: AppContext = Depends(get_context)
+):
+    """
+    Send message to agent with authorization.
+
+    Creates new session if session_id is None, otherwise continues existing.
+    Persists all messages to database.
+    """
+    # Validate message content
+    await validate_message_content(request.message)
+
+    # Use context if available, else fall back to globals
+    mgr = ctx.session_manager if ctx and ctx.is_initialized else session_manager
+    rt = ctx.agent_runtime if ctx and ctx.is_initialized else runtime
+    pool = ctx.db_pool if ctx and ctx.is_initialized else db_pool
+
+    if not mgr or not rt or not pool:
+        raise HTTPException(status_code=503, detail="Agent runtime not initialized")
+
+    # Verify session access if session_id provided
+    if request.session_id:
+        await verify_session_access(
+            request.session_id,
+            request.character_id,
+            authorization
+        )
+
+    # Load or create session
+    if request.session_id:
+        session = await mgr.load_session(request.session_id)
+        if not session:
+            raise HTTPException(status_code=404, detail="Session not found")
+    else:
+        # Get user settings
+        user_settings = get_default_settings(character_id=request.character_id or -1)
+
+        # Create new session
+        session = await mgr.create_session(
+            character_id=request.character_id,
+            autonomy_level=user_settings.autonomy_level
+        )
+
+    # Save user message to database
+    async with pool.acquire() as conn:
+        repo = MessageRepository(conn)
+        user_message = AgentMessage.create(
+            session_id=session.id,
+            role="user",
+            content=request.message
+        )
+        await repo.save(user_message)
+
+    # Add user message to session
+    session.add_message("user", request.message)
+    await mgr.save_session(session)
+
+    # Execute runtime (async, don't await in Phase 1)
+    # Phase 2 will add background task execution
+    try:
+        response = await rt.execute(session)
+
+        # Save assistant response to database if available
+        if response and "content" in response:
+            async with pool.acquire() as conn:
+                repo = MessageRepository(conn)
+
+                # Extract text from content blocks
+                text_content = ""
+                for block in response["content"]:
+                    if block.get("type") == "text":
+                        text_content += block.get("text", "")
+
+                assistant_message = AgentMessage.create(
+                    session_id=session.id,
+                    role="assistant",
+                    content=text_content,
+                    content_blocks=response["content"]
+                )
+
+                # Add token usage if available
+                if "usage" in response:
+                    assistant_message.token_usage = response["usage"]
+
+                await repo.save(assistant_message)
+
+    except Exception as e:
+        logger.error(f"Runtime execution failed: {e}")
+        session.status = SessionStatus.ERROR
+        await mgr.save_session(session)
+
+    return ChatResponse(
+        session_id=session.id,
+        status=session.status.value
+    )
+
+
+@router.get("/chat/history/{session_id}", response_model=ChatHistoryResponse)
+async def get_chat_history(
+    session_id: str,
+    limit: int = 100,
+    authorization: Optional[str] = Header(None),
+    ctx: AppContext = Depends(get_context)
+):
+    """
+    Get chat history for a session with authorization.
+
+    Args:
+        session_id: Session ID
+        limit: Max messages to return (default 100)
+        authorization: Authorization header
+
+    Returns:
+        Chat history with messages
+    """
+    # Verify access
+    await verify_session_access(session_id, authorization=authorization)
+
+    # Use context if available, else fall back to globals
+    mgr = ctx.session_manager if ctx and ctx.is_initialized else session_manager
+    pool = ctx.db_pool if ctx and ctx.is_initialized else db_pool
+
+    if not pool:
+        raise HTTPException(status_code=503, detail="Database not initialized")
+
+    # Verify session exists
+    session = await mgr.load_session(session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    # Get messages from database
+    async with pool.acquire() as conn:
+        repo = MessageRepository(conn)
+        messages = await repo.get_by_session(session_id, limit)
+
+    # Convert to dict format
+    message_dicts = [
+        {
+            "id": msg.id,
+            "role": msg.role,
+            "content": msg.content,
+            "content_blocks": msg.content_blocks,
+            "created_at": msg.created_at.isoformat(),
+            "token_usage": msg.token_usage
+        }
+        for msg in messages
+    ]
+
+    return ChatHistoryResponse(
+        session_id=session_id,
+        messages=message_dicts,
+        message_count=len(message_dicts)
+    )
+
+
+@router.post("/chat/stream")
+async def stream_chat_response(
+    request: ChatStreamRequest,
+    authorization: Optional[str] = Header(None),
+    ctx: AppContext = Depends(get_context)
+):
+    """Stream chat response via SSE with tool execution."""
+    await validate_message_content(request.message)
+    await verify_session_access(request.session_id, request.character_id, authorization)
+
+    # Use context if available, else fall back to globals
+    mgr = ctx.session_manager if ctx and ctx.is_initialized else session_manager
+    pool = ctx.db_pool if ctx and ctx.is_initialized else db_pool
+    llm = ctx.llm_client if ctx and ctx.is_initialized else llm_client
+    mcp = ctx.mcp_client if ctx and ctx.is_initialized else mcp_client
+
+    if mgr is None:
+        raise HTTPException(status_code=503, detail="Session manager not initialized")
+
+    # Load or create session
+    session = await mgr.load_session(request.session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail=f"Session not found: {request.session_id}")
+
+    # Save user message
+    async with pool.acquire() as conn:
+        repo = MessageRepository(conn)
+        user_message = AgentMessage.create(
+            session_id=session.id,
+            role="user",
+            content=request.message
+        )
+        await repo.save(user_message)
+
+    # Add to session
+    session.add_message("user", request.message)
+    await mgr.save_session(session)
+
+    # Create SSE generator using agentic loop
+    async def generate():
+        formatter = SSEFormatter()
+        full_response = ""
+        tool_calls_executed = []
+
+        try:
+            messages = session.get_messages_for_api()
+            user_settings = get_default_settings(character_id=request.character_id or -1)
+
+            loop = AgenticStreamingLoop(
+                llm_client=llm,
+                mcp_client=mcp,
+                user_settings=user_settings,
+                max_iterations=5,
+                event_bus=mgr.event_bus if mgr else None
+            )
+
+            async for event in loop.execute(
+                messages=messages,
+                system=SYSTEM_PROMPT,
+                session_id=session.id
+            ):
+                event_type = event.get("type")
+
+                if event_type == "text":
+                    text = event.get("text", "")
+                    full_response += text
+                    yield formatter.format_text_chunk(text)
+
+                elif event_type == "thinking":
+                    yield formatter.format({
+                        "type": "thinking",
+                        "iteration": event.get("iteration")
+                    })
+
+                elif event_type == "tool_call_started":
+                    yield formatter.format({
+                        "type": "tool_call_started",
+                        "tool": event.get("tool"),
+                        "arguments": event.get("arguments")
+                    })
+
+                elif event_type == "tool_call_completed":
+                    tool_calls_executed.append({
+                        "tool": event.get("tool"),
+                        "result": event.get("result")
+                    })
+                    yield formatter.format({
+                        "type": "tool_call_completed",
+                        "tool": event.get("tool")
+                    })
+
+                elif event_type == "authorization_denied":
+                    yield formatter.format({
+                        "type": "authorization_denied",
+                        "tool": event.get("tool"),
+                        "reason": event.get("reason")
+                    })
+
+                elif event_type == "error":
+                    yield formatter.format_error(event.get("error", "Unknown error"))
+                    return
+
+                elif event_type == "done":
+                    break
+
+            # Save assistant response
+            content_blocks = [{"type": "text", "text": full_response}]
+            if tool_calls_executed:
+                content_blocks.append({"type": "tool_calls", "tool_calls": tool_calls_executed})
+
+            async with pool.acquire() as conn:
+                repo = MessageRepository(conn)
+                message = AgentMessage.create(
+                    session_id=session.id,
+                    role="assistant",
+                    content=full_response,
+                    content_blocks=content_blocks
+                )
+                await repo.save(message)
+
+            yield formatter.format_done(message.id)
+
+        except Exception as e:
+            logger.error(f"Streaming error: {e}", exc_info=True)
+            yield formatter.format_error(str(e))
+
+    return StreamingResponse(
+        generate(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no"
+        }
+    )
+
+
+@router.get("/session/{session_id}")
+async def get_session(
+    session_id: str,
+    ctx: AppContext = Depends(get_context)
+):
+    """Get session state."""
+    # Use context if available, else fall back to globals
+    mgr = ctx.session_manager if ctx and ctx.is_initialized else session_manager
+
+    if not mgr:
+        raise HTTPException(status_code=503, detail="Session manager not initialized")
+
+    session = await mgr.load_session(session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    return {
+        "id": session.id,
+        "character_id": session.character_id,
+        "autonomy_level": session.autonomy_level.value,
+        "status": session.status.value,
+        "created_at": session.created_at.isoformat(),
+        "updated_at": session.updated_at.isoformat(),
+        "messages": [
+            {
+                "role": msg.role,
+                "content": msg.content,
+                "timestamp": msg.timestamp.isoformat()
+            }
+            for msg in session.messages
+        ]
+    }
+
+
+@router.delete("/session/{session_id}")
+async def delete_session(
+    session_id: str,
+    ctx: AppContext = Depends(get_context)
+):
+    """Delete session."""
+    # Use context if available, else fall back to globals
+    mgr = ctx.session_manager if ctx and ctx.is_initialized else session_manager
+
+    if not mgr:
+        raise HTTPException(status_code=503, detail="Session manager not initialized")
+
+    session = await mgr.load_session(session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    await mgr.delete_session(session_id)
+
+    return {"message": "Session deleted", "session_id": session_id}
+
+
+@router.post("/execute")
+async def execute_plan(
+    request: ExecuteRequest,
+    ctx: AppContext = Depends(get_context)
+):
+    """
+    Approve and execute pending plan.
+
+    Args:
+        request: Execute request with session and plan IDs
+
+    Returns:
+        Execution status
+    """
+    # Use context if available, else fall back to globals
+    mgr = ctx.session_manager if ctx and ctx.is_initialized else session_manager
+    rt = ctx.agent_runtime if ctx and ctx.is_initialized else runtime
+
+    if not mgr or not rt:
+        raise HTTPException(status_code=503, detail="Agent runtime not initialized")
+
+    # Load session
+    session = await mgr.load_session(request.session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    # Load plan
+    plan = await mgr.plan_repo.load_plan(request.plan_id)
+    if not plan:
+        raise HTTPException(status_code=404, detail="Plan not found")
+
+    # Verify plan belongs to session
+    if plan.session_id != session.id:
+        raise HTTPException(status_code=400, detail="Plan does not belong to session")
+
+    # Mark plan as approved
+    plan.status = PlanStatus.APPROVED
+    plan.approved_at = datetime.now()
+    await mgr.plan_repo.save_plan(plan)
+
+    # Update session status
+    session.status = SessionStatus.EXECUTING
+    session.context["current_plan_id"] = plan.id
+    if "pending_plan_id" in session.context:
+        del session.context["pending_plan_id"]
+    await mgr.save_session(session)
+
+    # Execute plan (async, don't wait)
+    asyncio.create_task(rt._execute_plan(session, plan))
+
+    return {
+        "status": "executing",
+        "session_id": session.id,
+        "plan_id": plan.id,
+        "message": "Plan approved and executing"
+    }
+
+
+@router.post("/reject")
+async def reject_plan(
+    request: RejectRequest,
+    ctx: AppContext = Depends(get_context)
+):
+    """
+    Reject pending plan.
+
+    Args:
+        request: Reject request with session and plan IDs
+
+    Returns:
+        Rejection status
+    """
+    # Use context if available, else fall back to globals
+    mgr = ctx.session_manager if ctx and ctx.is_initialized else session_manager
+
+    if not mgr:
+        raise HTTPException(status_code=503, detail="Session manager not initialized")
+
+    # Load session
+    session = await mgr.load_session(request.session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    # Load plan
+    plan = await mgr.plan_repo.load_plan(request.plan_id)
+    if not plan:
+        raise HTTPException(status_code=404, detail="Plan not found")
+
+    # Mark plan as rejected
+    plan.status = PlanStatus.REJECTED
+    await mgr.plan_repo.save_plan(plan)
+
+    # Return session to idle
+    session.status = SessionStatus.IDLE
+    if "pending_plan_id" in session.context:
+        del session.context["pending_plan_id"]
+    await mgr.save_session(session)
+
+    return {
+        "status": "idle",
+        "session_id": session.id,
+        "plan_id": plan.id,
+        "message": "Plan rejected"
+    }
+
+
+@router.websocket("/stream/{session_id}")
+async def websocket_stream(websocket: WebSocket, session_id: str):
+    """
+    WebSocket endpoint for real-time event streaming.
+
+    Args:
+        websocket: WebSocket connection
+        session_id: Session ID to stream events for
+    """
+    # Accept connection
+    await websocket.accept()
+    logger.info(f"WebSocket connected for session: {session_id}")
+
+    # Get session manager - try context first, then globals
+    try:
+        from ..core.context import _app_context
+        mgr = _app_context.session_manager if _app_context and _app_context.is_initialized else session_manager
+    except Exception:
+        mgr = session_manager
+
+    if not mgr:
+        logger.warning(f"WebSocket connection rejected - session manager not initialized")
+        await websocket.close(code=1011, reason="Session manager not initialized")
+        return
+
+    # Verify session exists
+    session = await mgr.load_session(session_id)
+    if not session:
+        logger.warning(f"WebSocket connection rejected - session not found: {session_id}")
+        await websocket.close(code=1008, reason="Session not found")
+        return
+
+    # Event handler to send events to WebSocket
+    async def send_event(event: AgentEvent):
+        """Send event to WebSocket client."""
+        try:
+            event_dict = event.to_dict()
+            await websocket.send_json(event_dict)
+        except WebSocketDisconnect:
+            logger.warning(
+                f"WebSocket disconnected while sending event for session {session_id}",
+                exc_info=True
+            )
+            # Unsubscribe on disconnect
+            mgr.event_bus.unsubscribe(session_id, send_event)
+        except Exception as e:
+            logger.error(
+                f"Error sending event to WebSocket for session {session_id}: {e}",
+                exc_info=True
+            )
+
+    # Subscribe to session events
+    mgr.event_bus.subscribe(session_id, send_event)
+    logger.info(f"WebSocket subscribed to events for session: {session_id}")
+
+    try:
+        # Keep connection alive and handle incoming messages
+        while True:
+            try:
+                # Receive messages (for heartbeat or control commands)
+                data = await websocket.receive_text()
+
+                # Handle ping/pong for keepalive
+                if data == "ping":
+                    await websocket.send_text("pong")
+                    logger.debug(f"WebSocket ping/pong for session: {session_id}")
+
+            except WebSocketDisconnect:
+                logger.info(f"WebSocket client disconnected normally for session: {session_id}")
+                break
+            except Exception as e:
+                logger.error(
+                    f"Error in WebSocket receive loop for session {session_id}: {type(e).__name__}: {e}",
+                    exc_info=True
+                )
+                break
+
+    finally:
+        # Unsubscribe when connection closes
+        mgr.event_bus.unsubscribe(session_id, send_event)
+        logger.info(f"WebSocket disconnected for session: {session_id}")

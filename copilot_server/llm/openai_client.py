@@ -1,0 +1,262 @@
+"""
+OpenAI API Client
+Handles LLM interactions with OpenAI API (compatible with Anthropic interface).
+"""
+
+import json
+from openai import OpenAI, AsyncOpenAI
+from typing import List, Dict, Any, Optional, AsyncIterator
+import logging
+from tenacity import (
+    retry,
+    stop_after_attempt,
+    wait_exponential,
+    retry_if_exception_type,
+    before_sleep_log
+)
+
+logger = logging.getLogger(__name__)
+
+
+class OpenAIClient:
+    """Client for OpenAI API with streaming support."""
+
+    def __init__(self, api_key: Optional[str] = None, model: str = "gpt-4-turbo-preview"):
+        """
+        Initialize OpenAI client.
+
+        Args:
+            api_key: OpenAI API key
+            model: Model to use (default: gpt-4-turbo-preview)
+        """
+        self.api_key = api_key
+        self.model = model
+        self.client = AsyncOpenAI(api_key=self.api_key) if api_key else None
+
+        if not self.api_key:
+            logger.warning("No OpenAI API key provided - client will not work")
+
+    async def chat(
+        self,
+        messages: List[Dict[str, Any]],
+        tools: Optional[List[Dict[str, Any]]] = None,
+        system: Optional[str] = None,
+        max_tokens: int = 4096
+    ) -> Dict[str, Any]:
+        """
+        Send chat request to OpenAI.
+
+        Args:
+            messages: List of message dicts with role and content
+            tools: Optional list of tool definitions
+            system: Optional system prompt
+            max_tokens: Maximum tokens to generate
+
+        Returns:
+            Response dict with content and usage
+        """
+        if not self.client:
+            raise ValueError("OpenAI client not initialized - missing API key")
+
+        # Add system message if provided
+        if system:
+            messages = [{"role": "system", "content": system}] + messages
+
+        params = {
+            "model": self.model,
+            "messages": messages,
+            "max_tokens": max_tokens
+        }
+
+        # Add tools if provided (convert from Anthropic format to OpenAI format)
+        if tools:
+            params["tools"] = self._convert_tools(tools)
+
+        try:
+            response = await self.client.chat.completions.create(**params)
+            message = response.choices[0].message
+
+            # Build content array in Anthropic-compatible format
+            content = []
+
+            # Add text content if present
+            if message.content:
+                content.append({
+                    "type": "text",
+                    "text": message.content
+                })
+
+            # Convert OpenAI tool_calls to Anthropic tool_use format
+            if message.tool_calls:
+                for tool_call in message.tool_calls:
+                    try:
+                        args = json.loads(tool_call.function.arguments)
+                    except json.JSONDecodeError:
+                        args = {}
+                    content.append({
+                        "type": "tool_use",
+                        "id": tool_call.id,
+                        "name": tool_call.function.name,
+                        "input": args
+                    })
+
+            # Ensure at least empty text if no content
+            if not content:
+                content.append({"type": "text", "text": ""})
+
+            return {
+                "content": content,
+                "usage": {
+                    "input_tokens": response.usage.prompt_tokens,
+                    "output_tokens": response.usage.completion_tokens
+                }
+            }
+        except Exception as e:
+            logger.error(f"Unexpected error in chat: {e}")
+            raise
+
+    async def _stream_response(
+        self,
+        params: Dict[str, Any],
+        convert_format: bool = True
+    ) -> AsyncIterator[Dict[str, Any]]:
+        """
+        Stream chat response from OpenAI.
+
+        Args:
+            params: Request parameters
+            convert_format: If True, convert to Anthropic format. If False, yield raw OpenAI chunks.
+
+        Yields:
+            Event dicts (Anthropic format if convert_format=True, raw OpenAI if False)
+        """
+        if not self.client:
+            raise ValueError("OpenAI client not initialized - missing API key")
+
+        try:
+            # Extract system prompt if provided (OpenAI doesn't accept it as separate param)
+            system_prompt = params.pop("system", None)
+            messages = params.get("messages", [])
+
+            # Add system message as first message if provided
+            if system_prompt:
+                messages = [{"role": "system", "content": system_prompt}] + messages
+                params["messages"] = messages
+
+            # Convert tools from Anthropic format to OpenAI format if provided
+            # Skip conversion if tools are already in OpenAI format (have "type" field)
+            if "tools" in params and params["tools"]:
+                if params["tools"] and not params["tools"][0].get("type") == "function":
+                    params["tools"] = self._convert_tools(params["tools"])
+
+            # Ensure stream=True is set (don't duplicate if already in params)
+            stream_params = {**params, "stream": True}
+
+            stream = await self.client.chat.completions.create(**stream_params)
+
+            async for chunk in stream:
+                if convert_format:
+                    # Convert to Anthropic format for backward compatibility
+                    delta = chunk.choices[0].delta
+
+                    # Yield text delta events (Anthropic-compatible format)
+                    if delta.content:
+                        yield {
+                            "type": "content_block_delta",
+                            "delta": {
+                                "type": "text_delta",
+                                "text": delta.content
+                            }
+                        }
+
+                    # Yield done event when finished
+                    if chunk.choices[0].finish_reason:
+                        yield {
+                            "type": "message_stop"
+                        }
+                else:
+                    # Yield raw OpenAI chunk for tool extraction
+                    yield {
+                        "choices": [
+                            {
+                                "delta": chunk.choices[0].delta.model_dump(),
+                                "finish_reason": chunk.choices[0].finish_reason
+                            }
+                        ]
+                    }
+
+        except Exception as e:
+            logger.error(f"Stream error: {e}")
+            raise
+
+    def build_tool_schema(self, mcp_tools: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """
+        Convert MCP tool definitions to OpenAI function calling schema.
+
+        Args:
+            mcp_tools: MCP tool definitions (with input_schema)
+
+        Returns:
+            OpenAI-compatible function schemas
+        """
+        return self._convert_tools(mcp_tools)
+
+    def _convert_tools(self, tools: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """
+        Convert MCP/Anthropic tool format to OpenAI function format.
+
+        Args:
+            tools: Tools in MCP format (parameters as array) or Anthropic format (input_schema)
+
+        Returns:
+            Tools in OpenAI format
+        """
+        openai_tools = []
+        for tool in tools:
+            # Check if already in OpenAI format (has type: function and function.name)
+            if tool.get("type") == "function" and tool.get("function", {}).get("name"):
+                openai_tools.append(tool)
+                continue
+
+            if not tool.get("name"):
+                logger.warning(f"Skipping tool without name: {tool}")
+                continue
+
+            # Handle MCP format (parameters as array) or Anthropic format (input_schema)
+            params = tool.get("parameters", [])
+            input_schema = tool.get("input_schema")
+
+            if input_schema:
+                # Anthropic format - use input_schema directly
+                parameters = input_schema
+            elif isinstance(params, list):
+                # MCP format - convert array to OpenAI properties format
+                properties = {}
+                required = []
+                for param in params:
+                    param_name = param.get("name")
+                    if param_name:
+                        properties[param_name] = {
+                            "type": param.get("type", "string"),
+                            "description": param.get("description", "")
+                        }
+                        if param.get("required"):
+                            required.append(param_name)
+                parameters = {
+                    "type": "object",
+                    "properties": properties,
+                    "required": required
+                }
+            else:
+                # Already in OpenAI format or empty
+                parameters = params if params else {"type": "object", "properties": {}}
+
+            openai_tools.append({
+                "type": "function",
+                "function": {
+                    "name": tool.get("name"),
+                    "description": tool.get("description", ""),
+                    "parameters": parameters
+                }
+            })
+        return openai_tools

@@ -1,0 +1,687 @@
+import { Meta } from '@storybook/addon-docs/blocks';
+
+<Meta title="Docs/Dogma Engine" />
+
+# Dogma Engine -- EVE Fitting Simulation
+
+The Dogma Engine is the core calculation system that powers all fitting statistics in the EVE Co-Pilot platform.
+It replicates EVE Online's attribute modification pipeline to produce PyFA-level accuracy for ship fitting simulation.
+
+**Backend location:** `services/character-service/app/services/dogma/engine.py`
+**Stats service:** `services/character-service/app/services/fitting_stats/service.py`
+**Test count:** 865+ unit tests in character-service
+
+---
+
+## 1. Pipeline Overview
+
+The engine's entry point is `DogmaEngine.calculate_modified_attributes()`, a ~40-line orchestrator that delegates to 6 named pipeline stages:
+
+```
+calculate_modified_attributes()
+  -> _load_base_data()                 # Stages 1-3b
+  -> _load_implant_and_booster_data()  # Stages 1.5b-c
+  -> _build_skill_data()               # Stages 1.5d-e
+  -> _collect_all_modifiers()          # Stage 4
+  -> _route_modifiers()                # Stage 5
+  -> _apply_pipeline()                 # Stages 5.5-9
+```
+
+### Stage 1-3b: `_load_base_data()`
+
+Loads SDE attributes for ship, all fitted modules, and charges from `dgmTypeAttributes`.
+Supplements ship attributes with mass/capacity from `invTypes` (some attrs live there instead of `dgmTypeAttributes`).
+Loads `groupID` for each module (needed by `LocationGroupModifier`) and required skills (attrs 182/183/184) for `OwnerRequiredSkillModifier`.
+
+### Stage 1.5b-c: `_load_implant_and_booster_data()`
+
+Loads implant and booster attributes, group IDs, and required skills. Merges them into the module data dictionaries so they participate in modifier resolution just like fitted modules.
+
+### Stage 1.5d-e: `_build_skill_data()`
+
+Creates "virtual modules" for each character skill. In **All V mode** (no character specified), loads all skills at level 5. In **Character mode**, loads only trained skills at their actual levels. Applies skill self-modifiers (2-step chain) before merging skill attrs into `module_attrs`.
+
+### Stage 4: `_collect_all_modifiers()`
+
+Loads and parses modifiers from all sources:
+
+| Source | Method | Notes |
+|--------|--------|-------|
+| Fitted modules | `_load_modifiers()` | With effectCategory + state filtering |
+| Implants | `_load_modifiers()` | Always treated as active |
+| Boosters | `_load_modifiers()` | Always treated as active |
+| Skills | `_load_skill_pipeline_modifiers()` | Tagged `is_skill=True`, excludes self-mods (handled in 1.5e) |
+
+### Stage 5: `_route_modifiers()` (static)
+
+Separates the combined modifier list into domain-specific buckets:
+
+| Bucket | Modifier Functions | Target |
+|--------|--------------------|--------|
+| `ship_modifiers` | `ItemModifier(domain=shipID)` | Ship attributes |
+| `location_modifiers` | `LocationGroupModifier`, `LocationRequiredSkillModifier`, `LocationModifier` | Module attributes |
+| `owner_skill_modifiers` | `OwnerRequiredSkillModifier` | Module/drone attributes |
+| `self_modifiers` | `ItemModifier(domain=itemID)` | Module's own attributes (overload) |
+
+### Stage 5.5-9: `_apply_pipeline()`
+
+The final application stage runs these sub-steps in order:
+
+| Step | Action |
+|------|--------|
+| 5.5 | Apply **ship role bonuses** (hull bonuses to module attrs) |
+| 5.7 | Apply **T3D mode modifiers** (PostDiv on ship + module attrs) |
+| 5.8 | Apply **self-modifiers** (overload bonuses on module's own attrs) |
+| 5.95 | **Pre-apply rig drawback reduction** (rigging skill reduces attr 1138 before step 6) |
+| 6 | Apply **location modifiers** to module attributes |
+| 6b | Apply **location modifiers** to charge attributes (e.g., MGE -> explosion radius) |
+| 7 | Apply **ship-targeting modifiers** (module bonuses -> ship attrs, with stacking penalty) |
+| 8 | Apply **OwnerRequiredSkillModifier** (e.g., DDA bonus on drones) |
+| 9 | Apply **attribute caps** (e.g., `maxTargetRange` capped by `maximumRangeCap` at 300km) |
+
+**Returns:** `(modified_ship_attrs, modified_module_attrs, charge_bonuses, modified_charges)`
+
+---
+
+## 2. Stacking Penalty Rules
+
+EVE Online applies stacking penalties to prevent excessive stacking of the same bonus type from multiple fitted modules. The penalty formula is:
+
+```
+effectiveness(n) = e^(-((n / 2.67)^2))    where n is 0-indexed
+```
+
+Pre-computed coefficients: `[1.0, 0.8691, 0.5706, 0.2830, 0.1059, 0.0300]`
+
+### What Gets Penalized
+
+| Modifier Source | Stacking Penalized? | Implementation |
+|-----------------|---------------------|----------------|
+| Fitted modules (e.g., Gyrostab, Invuln II) | **YES** | Default bucket in `_apply_modifiers()` |
+| Character skills (Spaceship Command, etc.) | **NO** | `is_skill=True` flag routes to non-stacking bucket |
+| Rig bonuses (armor/shield HP rigs) | **NO** | `is_rig=True` flag routes to non-stacking bucket |
+| Rig drawbacks (CPU/velocity penalty) | **NO** | `is_drawback=True` flag routes to non-stacking bucket |
+| Ship role bonuses | **NO** | Applied in step 5.5, before stacking penalty phase |
+| Implants | Depends on effect | Processed as modules but many use non-penalized operations |
+
+This is critical for accuracy. Before the skill stacking fix, the Jackdaw agility was calculated as 3.5057 instead of the correct 3.2400 (exact EVE match).
+
+---
+
+## 3. Module States
+
+Each fitted module has a state that determines which of its effects are active.
+
+### State -> effectCategory Mapping
+
+| State | Allowed effectCategoryIDs | Description |
+|-------|---------------------------|-------------|
+| `offline` | (none) | No effects applied |
+| `online` | 0, 4 | Passive + online effects (uses powergrid) |
+| `active` | 0, 1, 4 | Passive + active + online (cap consumption) |
+| `overheated` | 0, 1, 4, 5 | All categories including overload bonuses |
+
+### effectCategory Derivation
+
+Since the SDE `effectCategory` column is NULL for many effects, the engine derives categories from effect metadata:
+
+```
+if "overload" in effectName  -> cat 5
+elif durationAttributeID set -> cat 1 (active)
+elif "online" in effectName  -> cat 4
+else                         -> cat 0 (passive)
+```
+
+### Excluded Effects
+
+Siege/Bastion/Industrial Core effects are excluded from passive fitting simulation:
+
+| Effect ID | Name |
+|-----------|------|
+| 4575 | `industrialCoreEffect2` (Capital Industrial Core I/II) |
+| 8119 | `industrialCompactCoreEffect2` |
+| 6582 | `moduleBonusSiegeModule` (Siege Module I/II) |
+| 6658 | `moduleBonusBastionModule` (Bastion Module I) |
+
+---
+
+## 4. T3D Mode Switching
+
+Tactical Destroyers (Confessor, Jackdaw, Hecate, Svipul) have 3 switchable modes (Defense, Propulsion, Sharpshooter) that modify ship and module attributes.
+
+### Implementation
+
+- API parameter: `mode_type_id` (from `GET /api/sde/modes/{ship_type_id}`)
+- Mode effects are in SDE group 1306 with `published=0` (unpublished but functional)
+- Applied at step 5.7 in the pipeline, after ship role bonuses (5.5) but before module->ship transfer (6)
+- Mode effects use **PostDiv** operation: `attr = attr / modifier_value`
+
+### Mode Effect Flow
+
+```
+1. _load_mode_effects(mode_type_id)
+   -> Query dgmTypeEffects + dgmEffects for group 1306
+   -> Parse modifierInfo for PostDiv modifiers
+   -> Load mode attribute values from dgmTypeAttributes
+
+2. _apply_mode_modifiers()
+   -> Apply PostDiv to ship_attrs and module_attrs
+   -> Uses LocationGroupModifier/LocationRequiredSkillModifier routing
+```
+
+---
+
+## 5. Triglavian Spool-Up
+
+Triglavian Entropic Disintegrators ramp up damage over consecutive firing cycles.
+
+### SDE Attributes
+
+| Attr ID | Name | Example Value |
+|---------|------|---------------|
+| 2733 | `damageMultiplierBonusPerCycle` | 0.05 (5% per cycle) |
+| 2734 | `damageMultiplierBonusMax` | 1.5 (+150% at max spool) |
+
+### Formula
+
+```
+effectiveMult = baseMult * (1 + min(cycle * bonusPerCycle, maxBonus))
+cycles_to_max = ceil(maxBonus / bonusPerCycle)
+```
+
+### DPS Variants
+
+| Variant | Formula |
+|---------|---------|
+| `min_dps` | Base DPS (cycle 0, no spool) |
+| `max_dps` | `base_dps * (1 + maxBonus)` |
+| `avg_dps` | `(min_dps + max_dps) / 2` |
+
+**Example:** Vedmak + Occult M -> 108 DPS (min) -> 337 DPS (max), ~223 DPS (avg)
+
+**Source:** `services/character-service/app/services/fitting_stats/spool.py`
+
+---
+
+## 6. Fighter DPS
+
+Carriers and supercarriers use fighter squadrons instead of drones. Each fighter squadron is a group of identical fighters.
+
+### Formula
+
+```
+dps_per_squadron = squadron_size * damage_mult * (em + th + kin + exp) / cycle_time_s
+total_dps = dps_per_squadron * number_of_squadrons
+```
+
+### Fighter Groups
+
+| Group ID | Type |
+|----------|------|
+| 1652 | Light Fighters |
+| 1653 | Heavy Fighters |
+| 1537 | Support Fighters |
+
+Combat DPS is calculated for Light and Heavy fighters only (group IDs 1652, 1653). Support fighters provide utility effects.
+
+### SDE Attribute IDs
+
+| Attr ID | Name |
+|---------|------|
+| 2215 | `fighterSquadronMaxSize` |
+| 51 | `speed` (rate of fire in ms) |
+| 64 | `damageMultiplier` |
+| 114/116/117/118 | EM/Explosive/Kinetic/Thermal damage |
+
+**Source:** `services/character-service/app/services/fitting_stats/fighters.py`
+
+---
+
+## 7. Fleet Boosts (Command Bursts)
+
+Command Bursts provide fleet-wide buffs. Instead of modeling the full burst calculation (which requires fleet composition), the engine accepts pre-calculated buff values as input.
+
+### warfareBuffID Definitions
+
+| buff_id | Name | Attributes | Operation |
+|---------|------|-----------|-----------|
+| **Shield Command** |||
+| 10 | Shield HP | 263 (shieldCapacity) | postPercent |
+| 11 | Shield Resist | 271, 272, 273, 274 | resist_add |
+| 12 | Shield Repair | 68 (shieldBonus) | postPercent |
+| **Armor Command** |||
+| 13 | Armor HP | 265 (armorHP) | postPercent |
+| 14 | Armor Resist | 267, 268, 269, 270 | resist_add |
+| 15 | Armor Repair Duration | 73 (duration) | postPercent |
+| **Skirmish Command** |||
+| 33 | Agility | 70 (agility) | postPercent |
+| 34 | Tackle Range | 103 (maxRange) | postPercent |
+| 35 | Speed | 37 (maxVelocity) | postPercent |
+| **Information Command** |||
+| 36 | Signature Radius | 552 (signatureRadius) | postPercent |
+| 37 | Lock Range | 76 (maxTargetRange) | postPercent |
+| 38 | Scan Resolution | 564 (scanResolution) | postPercent |
+| 39 | EWAR Resist | 2112, 2113 | postPercent |
+| **Mining Foreman** |||
+| 43 | Mining Yield | 77 (miningAmount) | postPercent |
+| 44 | Mining Crystal Volatility | 2699 | postPercent |
+| 45 | Mining Cycle Time | 73 (duration) | postPercent |
+
+### Operations
+
+```python
+postPercent:  attr *= (1 + value/100)
+resist_add:   attr *= (1 - value/100)   # reduces pass-through = increases resist
+```
+
+### Boost Presets (T2 Max Skills)
+
+| Preset | Buffs |
+|--------|-------|
+| `shield_t2_max` | HP +25.88%, Resist +12.94%, Repair +25.88% |
+| `armor_t2_max` | HP +25.88%, Resist +12.94%, Repair Duration -25.88% |
+| `skirmish_t2_max` | Agility -25.88%, Tackle Range +25.88%, Speed +25.88% |
+| `info_t2_max` | Sig Radius -25.88%, Lock Range +25.88%, Scan Res +25.88% |
+
+**Source:** `services/character-service/app/services/fitting_stats/fleet_boosts.py`
+
+---
+
+## 8. Projected Effects
+
+Projected effects are remote modules applied by other ships. They modify the target ship's attributes.
+
+### Effect Types
+
+| Type | Attribute | Operation | Stacking Penalized |
+|------|-----------|-----------|-------------------|
+| `web` | 37 (maxVelocity) | Reduce by X% | **Yes** |
+| `paint` | 552 (signatureRadius) | Increase by X% | **Yes** |
+| `neut` | (none -- cap drain) | GJ/s drain rate | No |
+| `remote_shield` | (none -- incoming rep) | HP/s shield rep | No |
+| `remote_armor` | (none -- incoming rep) | HP/s armor rep | No |
+
+### Stacking Penalty for Projected Effects
+
+Webs and target painters are stacking penalized using the same formula as fitted modules:
+
+```
+effective_strength = strength * e^(-((n / 2.67)^2))
+```
+
+Where `n` is the 0-indexed count of that effect type applied. For example, two webs at 60%:
+- Web 1: 60.0% * 1.0000 = 60.00% reduction
+- Web 2: 60.0% * 0.8691 = 52.15% reduction
+
+### Projected Presets
+
+| Preset | Effects |
+|--------|---------|
+| `single_web` | 1x web at 60% |
+| `double_web` | 2x web at 60% |
+| `web_paint` | 1x web 60% + 1x paint 30% |
+| `heavy_neut` | 1x neut 600 GJ/cycle |
+| `double_paint` | 2x paint at 30% |
+| `logi_shield` | 2x remote shield rep 350 HP/cycle |
+| `logi_armor` | 2x remote armor rep 350 HP/cycle |
+
+### Return Values
+
+```python
+{
+    "modified_attrs": dict,         # ship attrs with webs/paints applied
+    "cap_drain_per_s": float,       # total external cap drain (GJ/s)
+    "incoming_rep_shield": float,   # total incoming shield rep (HP/s)
+    "incoming_rep_armor": float,    # total incoming armor rep (HP/s)
+    "summary": list,                # description of each applied effect
+}
+```
+
+**Source:** `services/character-service/app/services/fitting_stats/projected.py`
+
+---
+
+## 9. Applied DPS Calculation
+
+Applied DPS accounts for weapon tracking, missile application, and target characteristics.
+
+### Turret Hit Chance
+
+```
+P = 0.5 ^ ((angular * sigRes / (tracking * sigTarget))^2
+            + (max(0, distance - optimal) / falloff)^2)
+```
+
+Where:
+- `angular` = angular velocity of target (rad/s)
+- `sigRes` = weapon signature resolution
+- `tracking` = weapon tracking speed
+- `sigTarget` = target signature radius
+- `distance` = range to target
+- `optimal` = weapon optimal range
+- `falloff` = weapon falloff range
+
+### Missile Application
+
+```
+damage_factor = min(1, sigT/expR, (sigT/expR * expV/targetV)^DRF)
+```
+
+Where:
+- `sigT` = target signature radius
+- `expR` = missile explosion radius
+- `expV` = missile explosion velocity
+- `targetV` = target velocity
+- `DRF` = damage reduction factor (attribute from missile)
+
+### Target Profiles
+
+| Profile | Sig Radius (m) | Velocity (m/s) | Distance (m) |
+|---------|----------------|-----------------|---------------|
+| Frigate | 35 | 400 | 5,000 |
+| Destroyer | 65 | 350 | 8,000 |
+| Cruiser | 150 | 200 | 15,000 |
+| Battlecruiser | 270 | 150 | 20,000 |
+| Battleship | 450 | 100 | 30,000 |
+| Capital | 3,000 | 60 | 50,000 |
+| Structure | 10,000 | 0 | 0 |
+
+### NPC Damage Profiles (for EHP)
+
+| Profile | EM | Thermal | Kinetic | Explosive |
+|---------|-----|---------|---------|-----------|
+| Omni | 25% | 25% | 25% | 25% |
+| Guristas | 0% | 39% | 61% | 0% |
+| Sansha | 53% | 47% | 0% | 0% |
+| Angels | 0% | 0% | 43% | 57% |
+| Serpentis | 0% | 40% | 60% | 0% |
+| Blood Raiders | 50% | 48% | 0% | 2% |
+| Rogue Drones | 0% | 38% | 38% | 24% |
+
+**Source:** `services/character-service/app/services/fitting_stats/constants.py`
+
+---
+
+## 10. Key Formulas
+
+### Navigation
+
+**Align Time:**
+```
+align_time = -ln(0.25) * mass * agility / 1,000,000
+```
+The EVE client shows the continuous value. Actual server applies tick quantization (ceil to next second).
+
+**Lock Time:**
+```
+lock_time = 40000 / (scan_resolution * asinh(sig_radius)^2)
+```
+Minimum 1 second (server tick).
+
+**Warp Time (3-phase):**
+```
+Phase 1 (Acceleration): covers exactly 1 AU
+  t_accel = ln(max_speed_mps) / k_accel
+  k_accel = warp_speed_au
+
+Phase 2 (Cruise): remaining distance at max warp speed
+  cruise_dist = total_dist - 1 AU - decel_dist
+  t_cruise = cruise_dist / warp_speed
+
+Phase 3 (Deceleration):
+  k_decel = min(warp_speed_au / 3, 2.0)   # capped at 6 AU/s
+  decel_dist = k_accel / k_decel AU
+  t_decel = ln(max_speed_mps) / k_decel
+```
+
+### Defense
+
+**Shield Peak Regen:**
+```
+peak_regen = 2.5 * shield_hp / tau_s
+```
+Peak occurs at 25% shield. `tau_s` = recharge time in seconds.
+
+**EHP (Effective Hit Points):**
+```
+ehp_layer = hp_layer / (1 - highest_resist_for_damage_profile)
+total_ehp = sum(ehp per layer)
+```
+Module HP bonuses are applied first, then resists with stacking penalty for fitted modules.
+
+**Effective Rep:**
+```
+ehp_per_s = raw_hp_per_s / avg_damage_pass_through
+```
+Where `avg_damage_pass_through` = weighted average of `(1 - resist)` across 4 damage types.
+
+**Sustainable Tank:**
+```
+if cap_stable:
+    sustained_rep = full_rep_rate
+else:
+    sustained_rep = full_rep_rate * min(1.0, cap_recharge / rep_cap_need)
+```
+
+### Capacitor Simulation
+
+The engine uses **EVE-style discrete simulation** when module drain data is available:
+
+```
+Key behavior: If a module cannot afford to activate (cap < cap_need),
+it WAITS -- the activation is delayed until cap recharges enough.
+
+Recharge at fraction x: rate(x) = 10 * cap / tau_s * (sqrt(x) - x)
+Peak recharge rate: 2.5 * cap / tau_s   (at 25% cap)
+
+Simulation: 1-second ticks, up to 6000s (100 min)
+Stability: avg cap % over last 300s window
+```
+
+Cap booster injection is modeled as periodic GJ injection into the discrete simulation. Charges with `ATTR_CAP_BOOSTER_BONUS` (attr 67) inject GJ per cycle.
+
+### Scanability
+
+```
+scanability = sig_radius / sensor_strength
+```
+Higher = easier to probe scan.
+
+---
+
+## 11. Overheating
+
+Overheated modules gain additional bonuses from their overload attributes in the SDE. The engine handles this through `effectCategory 5` (overload effects).
+
+### Implementation
+
+- Module state must be `"overheated"` to enable category 5 effects
+- Overload effects are `ItemModifier(domain=itemID)` -- they modify the module's own attributes
+- Applied at step 5.8 in the pipeline (self-modifiers)
+- Stats display shows `"X.X -> Y.Y DPS"` format (base -> overheated)
+
+### Damage Control Special Case
+
+The Damage Control effect encodes resist modifications as Op 0 (`PreAssign`) in the SDE, but EVE applies them as Op 4 (`PostMul`). The engine overrides this at modifier load time for all resist attribute IDs (267-274 for armor/shield, 109/110/111/113 for hull).
+
+---
+
+## 12. Combat Boosters
+
+Combat boosters (drugs) occupy slots 1-3 and provide bonuses with optional side effects.
+
+### Implementation
+
+- Boosters are loaded as modules in stage 1.5c (`_load_implant_and_booster_data`)
+- Their modifiers are loaded in stage 4c (`_collect_all_modifiers`)
+- Side effects use **index-based magnitude lookup** (`SIDE_EFFECT_MAGNITUDE_ATTRS[i]`)
+- Side effects are togglable -- the frontend sends which side effects are active
+
+### Slot Allocation
+
+| Slot | Typical Use |
+|------|------------|
+| Slot 1 | Standard boosters (Synth, Standard, Improved, Strong) |
+| Slot 2 | Mindflood, Sooth Sayer, etc. |
+| Slot 3 | Exile, Blue Pill, X-Instinct, etc. |
+
+---
+
+## 13. API Endpoints
+
+### Fitting Stats
+
+```
+POST /api/fittings/stats
+```
+
+Request body:
+```json
+{
+  "ship_type_id": 34828,
+  "items": [{"type_id": 2048, "flag": 11}, ...],
+  "character_id": 1117367444,
+  "charges": {"11": 27371, ...},
+  "module_states": {"11": "active", "19": "overheated"},
+  "implant_type_ids": [27180, 27186],
+  "booster_type_ids": [],
+  "mode_type_id": 47413,
+  "fleet_boosts": [{"buff_id": 10, "value": 25.88}],
+  "projected_effects": [{"effect_type": "web", "strength": 60, "count": 1}],
+  "target_profile": "cruiser"
+}
+```
+
+Returns: Full fitting stats including DPS, EHP, navigation, capacitor, repairs, applied DPS, spool variants, fighter DPS.
+
+### Supporting Endpoints
+
+| Endpoint | Method | Purpose |
+|----------|--------|---------|
+| `/api/fittings/boost-presets` | GET | Fleet boost preset configurations |
+| `/api/fittings/boost-definitions` | GET | warfareBuffID -> attribute mapping |
+| `/api/fittings/projected-presets` | GET | Projected effect preset configurations |
+| `/api/sde/modes/{ship_type_id}` | GET | T3D mode listing for Tactical Destroyers |
+| `/api/sde/ships` | GET | Ship browser with search |
+| `/api/sde/ships/{id}` | GET | Ship detail (slots, HP, cap, nav) |
+| `/api/sde/modules` | GET | Module browser (slot_type filter, category=charge) |
+| `/api/fittings/compare` | POST | Compare 2-4 fittings side-by-side |
+
+---
+
+## 14. Verification Data -- Jackdaw Example
+
+The following Jackdaw fitting was verified against the EVE client and PyFA after the skill stacking penalty fix.
+
+**Fitting:** SoE Epic Arc fit, Defense Mode, with Cytrex's skills + implants
+
+| Stat | Our Value | EVE Client | PyFA | Match |
+|------|-----------|------------|------|-------|
+| Agility | 3.24 | 3.2400 | -- | Exact |
+| Align Time | 27.4s | ~27.4s | 27.4s | Exact |
+| Velocity | 1089.4 m/s | 1089 m/s | 1089 m/s | Exact |
+| Signature Radius | 51.8 m | 52 m | 51.8 m | Exact (PyFA) |
+| Shield HP | 1159 | 1158 | 1120 | 1 HP diff vs EVE |
+| Shield EM Resist | 64.6% | 65% | 64.6% | Exact (PyFA) |
+| Shield Thermal Resist | 73.3% | 73% | 73.3% | Exact (PyFA) |
+| Shield Kinetic Resist | 70.0% | 70% | 70.0% | Exact (PyFA) |
+| Shield Explosive Resist | 66.7% | 67% | 66.7% | Exact (PyFA) |
+
+The 1 HP difference in Shield HP is due to floating-point rounding. EVE displays rounded integers; our engine preserves full precision.
+
+### Other Verification Points
+
+- **Rig drawback reduction:** Large Missile Launcher II CPU with Launcher Rigging IV + LE-605 implant: 22.9 -> 20.5 (correct)
+- **Triglavian spool-up:** Vedmak + Occult M: 108 DPS (min) -> 337 DPS (max), ~223 DPS (avg)
+- **Propmod effects:** 5MN MWD with correct velocity, mass increase, and sig bloom
+
+---
+
+## Pipeline Order Summary
+
+The complete pipeline order, including fleet boosts and projected effects applied by the stats service:
+
+```
+1.   _load_base_data()                    SDE attrs, groups, skills
+1.5  _load_implant_and_booster_data()     Implants, boosters
+1.5d _build_skill_data()                  Skill virtual modules
+4.   _collect_all_modifiers()             All modifier sources
+5.   _route_modifiers()                   Bucket by domain/func
+5.5  Ship role bonuses                    Hull bonuses (not stacking penalized)
+5.7  T3D mode modifiers                   PostDiv from group 1306
+5.8  Self-modifiers                       Overload bonuses
+5.95 Rig drawback pre-reduction           Rigging skill on attr 1138
+6.   Location modifiers -> modules        Module attr modifications
+6b.  Location modifiers -> charges        MGE -> explosion radius
+7.   Ship-targeting modifiers             Module -> ship (stacking penalized)
+8.   OwnerRequiredSkillModifier           DDA -> drones
+9.   Attribute caps                       maxTargetRange <= 300km
+---  Fleet boosts                         Post-Dogma, pre-stats
+---  Projected effects                    Post-Dogma, pre-stats
+---  Defense/Nav/DPS calculations         Final stat computation
+```
+
+---
+
+## Key SDE Attribute IDs
+
+| ID | Name | Used For |
+|----|------|----------|
+| 4 | mass | Align time, propmod effects |
+| 9 | hp (hull) | Hull HP |
+| 37 | maxVelocity | Speed, webs |
+| 51 | speed (rate of fire) | DPS calculation |
+| 64 | damageMultiplier | Weapon/drone DPS |
+| 67 | capacitorBonus | Cap booster injection |
+| 68 | shieldBonus | Shield rep amount |
+| 70 | agility | Align time |
+| 73 | duration | Cycle time |
+| 76 | maxTargetRange | Lock range (capped at 300km) |
+| 114/116/117/118 | EM/Exp/Kin/Th damage | Charge damage |
+| 182/183/184 | requiredSkill 1/2/3 | Skill requirements |
+| 263 | shieldCapacity | Shield HP |
+| 265 | armorHP | Armor HP |
+| 267-274 | Shield/Armor resists | Defense calculations |
+| 552 | signatureRadius | Sig radius, paints |
+| 564 | scanResolution | Lock time |
+| 1138 | drawback | Rig drawback reduction |
+| 2215 | fighterSquadronMaxSize | Fighter squadron size |
+| 2733 | damageMultiplierBonusPerCycle | Trig spool bonus/cycle |
+| 2734 | damageMultiplierBonusMax | Trig spool max bonus |
+
+---
+
+## Architecture Diagram
+
+```
+Frontend (FittingEditor.tsx)
+    |
+    v
+POST /api/fittings/stats
+    |
+    v
+FittingStatsService.calculate()
+    |
+    +-- DogmaEngine.calculate_modified_attributes()
+    |       |-- _load_base_data()           [SDE queries]
+    |       |-- _load_implant_and_booster_data()
+    |       |-- _build_skill_data()         [Skill virtual modules]
+    |       |-- _collect_all_modifiers()    [Effect parsing]
+    |       |-- _route_modifiers()          [Domain bucketing]
+    |       +-- _apply_pipeline()           [Stacking penalty, caps]
+    |
+    +-- apply_fleet_boosts()                [fleet_boosts.py]
+    +-- apply_projected_effects()           [projected.py]
+    +-- calculate_spool_dps()               [spool.py]
+    +-- calculate_fighter_dps()             [fighters.py]
+    +-- calculate_capacitor()               [calculations.py - discrete sim]
+    +-- calculate_turret_hit_chance()        [calculations.py]
+    +-- calculate_missile_application()     [calculations.py]
+    +-- calculate_warp_time()               [calculations.py]
+    +-- calculate_align_time()              [calculations.py]
+    +-- calculate_lock_time()               [calculations.py]
+    +-- calculate_shield_peak_regen()       [calculations.py]
+    |
+    v
+FittingStatsResponse (JSON)
+```

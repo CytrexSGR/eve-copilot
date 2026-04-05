@@ -1,0 +1,156 @@
+import { Meta } from '@storybook/addon-docs/blocks';
+
+<Meta title="Docs/Feature Gates" />
+
+# Feature Gates
+
+Infinimind Intelligence uses two gating components to control feature access based on subscription tier and active modules. Both gates are currently **disabled** (all content accessible), but the components and hooks are in place for when gating is re-enabled.
+
+## TierGate
+
+**File:** `src/components/TierGate.tsx`
+
+Wraps content that requires a minimum subscription tier.
+
+```tsx
+interface TierGateProps {
+  requiredTier: string;     // Minimum tier: 'free' | 'pilot' | 'corporation' | 'alliance' | 'coalition'
+  children: ReactNode;      // Content to show when tier requirement is met
+  showPreview?: boolean;    // If true, show a blurred preview instead of hiding content
+}
+```
+
+### Tier Hierarchy
+
+Tiers are ordered in `TIER_HIERARCHY` from `src/types/auth.ts`:
+
+| Tier | Level | Typical Features |
+|------|-------|-----------------|
+| `free` | 0 | Basic intel dashboard, public battle reports |
+| `pilot` | 1 | Market analysis, production tools, fittings, navigation |
+| `corporation` | 2 | Corp dashboard, finance, HR, SRP, fleet management |
+| `alliance` | 3 | Alliance-level intel, sovereignty tools |
+| `coalition` | 4 | PowerBloc intel, full platform access |
+
+A user with tier level N has access to all features at level N and below. For example, a `corporation` tier user can access `pilot` and `free` features as well.
+
+### Current Status
+
+TierGate is currently a **pass-through** -- it renders `children` unconditionally regardless of tier:
+
+```tsx
+export function TierGate({ children }: TierGateProps) {
+  // Feature gating disabled -- all tiers accessible to all users
+  return <>{children}</>;
+}
+```
+
+When re-enabled, it would compare `requiredTier` against the user's effective tier from `AuthContext.tierInfo.tier` using `TIER_HIERARCHY` ordering.
+
+## ModuleGate
+
+**File:** `src/components/ModuleGate.tsx`
+
+Wraps content that requires a specific module subscription.
+
+```tsx
+interface ModuleGateProps {
+  module: string;           // Required module slug (e.g., 'warfare_intel', 'market_analysis')
+  children: ReactNode;      // Content to show when module is active
+  preview?: boolean;        // Show blurred preview when module is inactive
+  seatRequired?: boolean;   // Whether a seat in the org plan is needed
+  fallback?: ReactNode;     // Custom fallback content when gated
+}
+```
+
+### Available Modules
+
+Defined in `MODULE_NAMES` from `src/types/auth.ts`:
+
+| Module Slug | Display Name | Price |
+|-------------|-------------|-------|
+| `warfare_intel` | Warfare Intel | 100M ISK |
+| `war_economy` | War Economy | 100M ISK |
+| `wormhole_intel` | Wormhole Intel | 100M ISK |
+| `doctrine_intel` | Doctrine Intel | 100M ISK |
+| `battle_analysis` | Battle Analysis | 100M ISK |
+| `character_suite` | Character Suite | 150M ISK |
+| `market_analysis` | Market Analysis | 150M ISK |
+| `production_suite` | Production Suite | 150M ISK |
+| `corp_intel` | Corporation Intel | 50M ISK |
+| `alliance_intel` | Alliance Intel | 75M ISK |
+| `powerbloc_intel` | PowerBloc Intel | 100M ISK |
+
+### Current Status
+
+ModuleGate is currently a **pass-through** -- it renders `children` unconditionally:
+
+```tsx
+export function ModuleGate({ children }: ModuleGateProps) {
+  // Feature gating disabled -- all modules accessible to all users
+  return <>{children}</>;
+}
+```
+
+## useModules Hook
+
+**File:** `src/hooks/useModules.ts`
+
+Provides module access checking logic used by ModuleGate and other components.
+
+```ts
+function useModules() {
+  const { activeModules, orgPlan, isLoggedIn } = useAuth();
+
+  return {
+    hasModule: (moduleName: string) => boolean,
+    hasOrgPlan: (orgType?: 'corporation' | 'alliance') => boolean,
+    hasSeat: () => boolean,
+    activeModules: string[],
+    orgPlan: OrgPlan | null,
+    isLoggedIn: boolean,
+  };
+}
+```
+
+### hasModule(moduleName)
+
+Checks if the user has access to a specific module:
+
+1. **Unauthenticated users**: Always returns `true` (public access bypasses gating)
+2. **No active modules**: Returns `false`
+3. **Direct match**: Checks if `moduleName` is in `activeModules`
+4. **Entity group match**: For entity modules like `corp_intel`, checks variant slugs (`corp_intel_1`, `corp_intel_5`, `corp_intel_unlimited`)
+
+Entity module groups are defined in `ENTITY_MODULE_GROUPS`:
+
+```ts
+const ENTITY_MODULE_GROUPS = {
+  corp_intel: ['corp_intel_1', 'corp_intel_5', 'corp_intel_unlimited'],
+  alliance_intel: ['alliance_intel_1', 'alliance_intel_5', 'alliance_intel_unlimited'],
+  powerbloc_intel: ['powerbloc_intel_1', 'powerbloc_intel_5', 'powerbloc_intel_unlimited'],
+};
+```
+
+### hasOrgPlan(orgType?)
+
+Checks if the user belongs to an organization with an active plan:
+
+- No `orgType`: Returns `true` if any org plan exists
+- `orgType === 'corporation'`: Returns `true` for any org plan (corp plans include corp access)
+- `orgType === 'alliance'`: Returns `true` only if `orgPlan.type === 'alliance'`
+
+### hasSeat()
+
+Returns whether the user has a seat in their organization's plan. Unauthenticated users always get `true` (public bypass).
+
+## Storybook Testing
+
+Use the **Tier** and **Auth** toolbar controls to simulate different gating scenarios:
+
+- **Auth off**: All gates pass (unauthenticated users bypass gating)
+- **Auth on + Tier free**: Logged-in user with free tier
+- **Auth on + Tier coalition**: Full access to all features
+- **Module toggles**: Test specific module access patterns
+
+Note: Since gating is currently disabled, all scenarios render identically. The toolbar controls will become meaningful when gating is re-enabled.

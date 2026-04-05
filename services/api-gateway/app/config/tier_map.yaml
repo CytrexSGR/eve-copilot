@@ -1,0 +1,137 @@
+# Endpoint-to-Tier Mapping for SaaS Feature-Gating
+#
+# Rules:
+# - Patterns support trailing wildcard: /api/foo/* matches /api/foo/bar/baz
+# - Exact match: /api/foo matches only /api/foo
+# - Checked from most permissive tier up; first match wins
+# - Unlisted endpoints default to "pilot" tier
+# - "public" means no authentication required at all
+#
+# Tier hierarchy: public < free < pilot < corporation < alliance < coalition
+
+# === PUBLIC (no auth required) ===
+public:
+  - "/api/auth/*"
+  - "/api/tier/pricing"
+  - "/api/tier/my-tier"
+  - "/api/tier/subscribe"
+  - "/api/tier/payment-status/*"
+  - "/api/tier/my-subscription"
+  - "/api/tier/corp-info"
+  - "/api/tier/modules/active"
+  - "/api/tier/modules/trial/*"
+  - "/api/tier/modules/pricing"
+  - "/api/feedback"
+  - "/health"
+  - "/metrics"
+  - "/docs"
+  - "/redoc"
+  - "/openapi.json"
+
+# === FREE TIER (logged in, public data only) ===
+free:
+  # Kill viewer (public zkill data)
+  - "/api/war/killmails"
+  - "/api/war/killmails/*"
+  - "/api/war/battles"
+  - "/api/war/battles/*"
+  # Entity lookup
+  - "/api/intelligence/fast/*/summary"
+  - "/api/intelligence/fast/*/header"
+  # Market: single price lookup
+  - "/api/market/prices/*"
+  - "/api/market/price/*"
+  - "/api/items/search"
+  - "/api/items/*"
+  # SDE browser
+  - "/api/sde/*"
+  # Sovereignty map (DOTLAN)
+  - "/api/dotlan/sovereignty/*"
+  - "/api/dotlan/activity/*"
+  - "/api/sovereignty/*"
+  # Wormhole lookup (static)
+  - "/api/wormhole/types"
+  - "/api/wormhole/types/*"
+
+# === PILOT TIER (personal character + full tool suite) ===
+pilot:
+  # Character data
+  - "/api/character/*"
+  - "/api/account-groups/*"
+  - "/api/skills/*"
+  - "/api/mastery/*"
+  - "/api/research/*"
+  - "/api/fittings/*"
+  # DPS/Dogma
+  - "/api/dps/*"
+  - "/api/dogma/*"
+  # Market (full)
+  - "/api/market/*"
+  - "/api/orders/*"
+  - "/api/hunter/*"
+  - "/api/trading/*"
+  - "/api/alerts/*"
+  - "/api/goals/*"
+  - "/api/history/*"
+  - "/api/portfolio/*"
+  - "/api/bookmarks/*"
+  - "/api/materials/*"
+  - "/api/route/*"
+  # Production
+  - "/api/production/*"
+  - "/api/reactions/*"
+  - "/api/pi/*"
+  - "/api/mining/*"
+  - "/api/supply-chain/*"
+  # Shopping
+  - "/api/shopping/*"
+  # Intelligence (full)
+  - "/api/intelligence/*"
+  - "/api/alliances/*"
+  - "/api/war/*"
+  - "/api/risk/*"
+  - "/api/reports/*"
+  # Wormhole (full)
+  - "/api/wormhole/*"
+  # Navigation
+  - "/api/jump/*"
+  # DOTLAN (full)
+  - "/api/dotlan/*"
+  # PowerBloc
+  - "/api/powerbloc/*"
+
+# === CORPORATION TIER (corp management) ===
+corporation:
+  # Finance
+  - "/api/finance/*"
+  - "/api/wallet/*"
+  # HR
+  - "/api/hr/*"
+  # Military ops
+  - "/api/military/*"
+  - "/api/fleet/*"
+  - "/api/timers/*"
+  # Contracts
+  - "/api/contracts/*"
+  - "/api/corp-contracts/*"
+  # Discord events
+  - "/api/events/*"
+  # Notifications
+  - "/api/notifications/*"
+  # Role management
+  - "/api/tier/roles/*"
+
+# === ALLIANCE TIER (strategic intel + cross-corp) ===
+alliance:
+  # Sovereignty monitoring
+  - "/api/sov/*"
+  - "/api/moon/*"
+  - "/api/fuel/*"
+  # Fingerprints
+  - "/api/fingerprints/*"
+  # MCP tools
+  - "/api/mcp/*"
+  - "/mcp/*"
+  # Scheduler admin
+  - "/api/scheduler/*"
+  - "/api/jobs/*"

@@ -1,0 +1,127 @@
+import { Meta } from '@storybook/addon-docs/blocks';
+
+<Meta title="Docs/Architecture" />
+
+# Architecture
+
+## Component Hierarchy
+
+The application follows a three-tier component hierarchy:
+
+```
+App
+ +-- QueryClientProvider (TanStack React Query)
+      +-- AuthProvider (EVE SSO session)
+           +-- PilotIntelProvider (pilot-specific data)
+                +-- BrowserRouter
+                     +-- Layout (sidebar + header)
+                          +-- Page (route-level component)
+                               +-- Domain Components (feature-specific)
+                                    +-- Shared UI (Card, StatBox, etc.)
+```
+
+**Pages** live in `src/pages/` and are lazy-loaded via `React.lazy()` with named exports.
+Each page composes **domain components** from `src/components/<domain>/` (e.g., `alliance/`, `battle/`, `fittings/`).
+Domain components rely on **shared UI** from `src/components/shared/`, `src/components/ui/`, and `src/components/common/`.
+
+## State Management
+
+### TanStack React Query
+
+The primary state management layer is **TanStack React Query v5** configured in `src/lib/queryClient.ts`:
+
+| Option | Value | Purpose |
+|--------|-------|---------|
+| `staleTime` | 60s | Data stays fresh for 60 seconds before re-fetching |
+| `gcTime` | 5 min | Garbage-collected after 5 minutes of inactivity |
+| `retry` | 2 | Failed requests retry twice |
+| `refetchOnWindowFocus` | DEV only | Only re-fetches on focus in development |
+| `refetchOnMount` | true | Re-fetches on mount if data is stale |
+
+### React Context
+
+Three context providers wrap the application:
+
+| Context | File | Purpose |
+|---------|------|---------|
+| `AuthContext` | `src/context/AuthContext.tsx` | EVE SSO session, account info, tier, active modules |
+| `PilotIntelContext` | `src/context/PilotIntelContext.tsx` | Pilot-specific intelligence data |
+| `QueryClientProvider` | TanStack built-in | React Query cache and configuration |
+
+## Directory Structure
+
+```
+src/
+  components/
+    alliance/          # Alliance detail views (offensive, defensive, geography, etc.)
+    battle/            # Battle detail panels (sides, loadouts, tank analysis)
+    battle-report/     # Battle report listing
+    battlefield/       # 2D battle map
+    characters/        # Character dashboard components
+    common/            # Common utilities
+    corp/              # Corporation management (dashboard, finance, HR, SRP)
+    corporation/       # Corporation intel views
+    dashboard/         # Main dashboard widgets
+    doctrines/         # Doctrine analysis
+    finance/           # Financial management
+    fittings/          # Ship fitting editor, browser, stats
+    fleet/             # Fleet management
+    home/              # Landing page sections
+    hr/                # Human resources
+    intel/             # Intelligence tools
+    market/            # Market analysis components
+    navigation/        # Route planner
+    powerbloc/         # PowerBloc (coalition) views
+    production/        # Manufacturing, PI, reactions
+    shared/            # Shared reusable components (LiveMapView, ThreatIntelPanels, HuntingScoreBoard, PilotRiskPanels, etc.)
+    shopping/          # Shopping list
+    srp/               # Ship Replacement Program
+    trade-routes/      # Trade route visualization
+    ui/                # Base UI primitives
+    war-economy/       # War economy analysis
+    warfare/           # Warfare tools
+    warfare-intel/     # Warfare intelligence
+    wormhole/          # Wormhole intel, Thera router
+  context/             # React context providers
+  hooks/               # Custom React hooks (useAuth, useModules, etc.)
+  lib/                 # Utilities (queryClient, EFT parser)
+  pages/               # Route-level page components (lazy-loaded)
+  services/api/        # Axios API client modules (22 modules, incl. intelligence.ts)
+  stories/             # Storybook MDX docs and stories
+  types/               # TypeScript type definitions
+```
+
+## Styling Approach
+
+The application uses **inline styles** with a centralized color system defined in `src/constants.ts`:
+
+```ts
+export const COLORS = {
+  positive: '#00ff88',    // Green -- gains, success
+  negative: '#ff4444',    // Red -- losses, danger
+  warning: '#ff8800',     // Orange -- warnings
+  accent: '#00d4ff',      // Cyan -- highlights, interactive
+  accentBlue: '#00d4ff',  // Alias for accent
+  textSecondary: 'rgba(255,255,255,0.5)',
+  textTertiary: 'rgba(255,255,255,0.4)',
+  borderSubtle: 'rgba(255,255,255,0.1)',
+};
+```
+
+Additional domain-specific color constants include `STATUS_LEVELS`, `DANGER_COLORS`, `TIER_COLORS`, and `MODULE_COLORS` (all in `src/constants.ts` and `src/types/auth.ts`).
+
+The overall theme is a dark UI (`#0d1117` background) inspired by EVE Online's interface aesthetic.
+
+## Build Setup
+
+Vite 7 is configured with manual chunk splitting for optimal loading:
+
+| Chunk | Contents | Loading |
+|-------|----------|---------|
+| `react-vendor` | react, react-dom | Every page |
+| `routing` | react-router-dom | Every page |
+| `data` | @tanstack/react-query, axios | Most pages |
+| `charts` | chart.js, react-chartjs-2 | Pages with graphs only |
+| `icons` | lucide-react | Many components |
+
+Pages are code-split via `React.lazy()` with a skeleton `PageLoader` fallback, ensuring the initial bundle stays small while feature-heavy pages load on demand.

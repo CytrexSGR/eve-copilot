@@ -1,0 +1,403 @@
+/* EVE Co-Pilot App Styles - Dark EVE Theme */
+
+:root {
+  /* EVE Online Color Palette */
+  --bg-primary: #0d1117;
+  --bg-secondary: #161b22;
+  --bg-elevated: #21262d;
+  --bg-hover: #30363d;
+
+  --text-primary: #e6edf3;
+  --text-secondary: #8b949e;
+  --text-tertiary: #6e7681;
+
+  --accent-blue: #58a6ff;
+  --accent-purple: #bc8cff;
+  --accent-gold: #d29922;
+
+  --success: #3fb950;
+  --warning: #d29922;
+  --danger: #f85149;
+
+  --border: #30363d;
+  --shadow: rgba(0, 0, 0, 0.4);
+}
+
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+body {
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Roboto', 'Oxygen',
+    'Ubuntu', 'Cantarell', 'Fira Sans', 'Droid Sans', 'Helvetica Neue', sans-serif;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  background: var(--bg-primary);
+  color: var(--text-primary);
+  line-height: 1.6;
+}
+
+code {
+  font-family: 'Courier New', monospace;
+  background: var(--bg-elevated);
+  padding: 2px 6px;
+  border-radius: 4px;
+}
+
+/* App Layout */
+.app {
+  display: flex;
+  flex-direction: column;
+  height: 100vh;
+  overflow: hidden;
+}
+
+.app-header {
+  background: var(--bg-secondary);
+  border-bottom: 1px solid var(--border);
+  padding: 1rem 2rem;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.app-header h1 {
+  font-size: 1.5rem;
+  font-weight: 700;
+  color: var(--accent-blue);
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.app-header .logo {
+  font-size: 1.8rem;
+}
+
+.session-id {
+  font-family: monospace;
+  font-size: 0.85rem;
+  color: var(--text-tertiary);
+  background: var(--bg-elevated);
+  padding: 0.25rem 0.75rem;
+  border-radius: 4px;
+}
+
+.app-main {
+  display: flex;
+  flex: 1;
+  overflow: hidden;
+}
+
+/* Loading State */
+.app-loading {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  height: 100vh;
+  gap: 1rem;
+}
+
+.spinner {
+  width: 48px;
+  height: 48px;
+  border: 4px solid var(--bg-elevated);
+  border-top-color: var(--accent-blue);
+  border-radius: 50%;
+  animation: spin 1s linear infinite;
+}
+
+@keyframes spin {
+  to { transform: rotate(360deg); }
+}
+
+/* Error State */
+.app-error {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  height: 100vh;
+  gap: 1rem;
+  padding: 2rem;
+  text-align: center;
+}
+
+.app-error h2 {
+  color: var(--danger);
+}
+
+.app-error button {
+  background: var(--accent-blue);
+  color: white;
+  border: none;
+  padding: 0.75rem 1.5rem;
+  border-radius: 6px;
+  font-size: 1rem;
+  cursor: pointer;
+  transition: background 0.2s;
+}
+
+.app-error button:hover {
+  background: var(--accent-purple);
+}
+
+/* Context Panel */
+.context-panel {
+  width: 280px;
+  background: var(--bg-secondary);
+  border-right: 1px solid var(--border);
+  padding: 1.5rem;
+  overflow-y: auto;
+}
+
+.context-panel h3 {
+  font-size: 1.1rem;
+  margin-bottom: 1.5rem;
+  color: var(--accent-gold);
+}
+
+.context-section {
+  margin-bottom: 1.5rem;
+}
+
+.context-section label {
+  display: block;
+  font-size: 0.9rem;
+  color: var(--text-secondary);
+  margin-bottom: 0.5rem;
+  font-weight: 600;
+}
+
+.context-section select,
+.context-section input {
+  width: 100%;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border);
+  color: var(--text-primary);
+  padding: 0.6rem;
+  border-radius: 6px;
+  font-size: 0.95rem;
+}
+
+.context-section small {
+  display: block;
+  margin-top: 0.5rem;
+  color: var(--text-tertiary);
+  font-size: 0.8rem;
+}
+
+.context-info {
+  margin-top: 2rem;
+  padding: 1rem;
+  background: var(--bg-elevated);
+  border-radius: 6px;
+}
+
+.context-info h4 {
+  font-size: 0.9rem;
+  color: var(--accent-blue);
+  margin-bottom: 0.75rem;
+}
+
+.context-info ul {
+  list-style: none;
+  font-size: 0.85rem;
+  color: var(--text-secondary);
+}
+
+.context-info li {
+  padding: 0.4rem 0;
+  border-bottom: 1px solid var(--border);
+}
+
+.context-info li:last-child {
+  border-bottom: none;
+}
+
+.context-info li::before {
+  content: '▸ ';
+  color: var(--accent-gold);
+  font-weight: bold;
+}
+
+/* Mobile Responsive Styles */
+
+/* Tablet and below */
+@media (max-width: 1024px) {
+  .app-main {
+    flex-direction: column;
+  }
+
+  .context-panel {
+    width: 100%;
+    border-right: none;
+    border-bottom: 1px solid var(--border);
+    max-height: 200px;
+    overflow-y: auto;
+  }
+
+  .session-list {
+    width: 100%;
+    border-right: none;
+    border-bottom: 1px solid var(--border);
+    max-height: 150px;
+  }
+
+  .session-list-content {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.5rem;
+  }
+
+  .session-group {
+    display: contents;
+  }
+
+  .session-group-header {
+    display: none;
+  }
+
+  .session-item {
+    padding: 0.4rem 0.6rem;
+  }
+}
+
+/* Mobile phones */
+@media (max-width: 640px) {
+  .app-header {
+    padding: 0.75rem 1rem;
+    flex-wrap: wrap;
+    gap: 0.5rem;
+  }
+
+  .app-header h1 {
+    font-size: 1.2rem;
+  }
+
+  .session-id {
+    font-size: 0.75rem;
+  }
+
+  .context-panel {
+    padding: 1rem;
+    max-height: 150px;
+  }
+
+  .context-section label {
+    font-size: 0.8rem;
+  }
+
+  .context-info {
+    display: none; /* Hide tips on mobile to save space */
+  }
+
+  .session-list {
+    max-height: 100px;
+  }
+
+  .message-content {
+    max-width: 90%;
+    padding: 0.75rem;
+  }
+
+  .message-avatar {
+    width: 32px;
+    height: 32px;
+    font-size: 1.2rem;
+  }
+
+  .chat-input {
+    padding: 0.75rem;
+  }
+
+  .chat-input input {
+    font-size: 0.9rem;
+  }
+
+  .welcome-message h2 {
+    font-size: 1.5rem;
+  }
+
+  .suggestions {
+    grid-template-columns: 1fr;
+  }
+
+  .suggestions button {
+    padding: 0.75rem;
+    font-size: 0.85rem;
+  }
+
+  /* Hide context panel on very small screens */
+  .context-panel {
+    display: none;
+  }
+}
+
+/* Small mobile phones */
+@media (max-width: 375px) {
+  .app-header h1 {
+    font-size: 1rem;
+  }
+
+  .app-header h1 .logo {
+    font-size: 1.2rem;
+  }
+
+  .session-list {
+    display: none; /* Hide session list on very small screens */
+  }
+
+  .message-content {
+    max-width: 95%;
+    font-size: 0.9rem;
+  }
+}
+
+/* Landscape mobile */
+@media (max-height: 500px) and (orientation: landscape) {
+  .app-header {
+    padding: 0.5rem 1rem;
+  }
+
+  .session-list,
+  .context-panel {
+    display: none;
+  }
+
+  .message-list {
+    padding: 0.75rem;
+  }
+
+  .chat-input {
+    padding: 0.5rem;
+  }
+}
+
+/* Print styles (hide interactive elements) */
+@media print {
+  .app-header,
+  .session-list,
+  .context-panel,
+  .chat-input,
+  .tool-calls,
+  .audio-player {
+    display: none;
+  }
+
+  .app-main {
+    display: block;
+  }
+
+  .message-list {
+    max-height: none;
+    overflow: visible;
+  }
+
+  .message {
+    page-break-inside: avoid;
+  }
+}

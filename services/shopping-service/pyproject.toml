@@ -1,0 +1,23 @@
+[project]
+name = "shopping-service"
+version = "0.1.0"
+description = "EVE Online Shopping List Management Service"
+requires-python = ">=3.11"
+dependencies = [
+    "eve-shared",
+    "fastapi>=0.104.0",
+    "uvicorn[standard]>=0.24.0",
+    "pydantic>=2.5.0",
+    "pydantic-settings>=2.1.0",
+    "httpx>=0.25.0",
+    "asyncpg>=0.29.0",
+    "redis>=5.0.0",
+]
+
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["app*"]

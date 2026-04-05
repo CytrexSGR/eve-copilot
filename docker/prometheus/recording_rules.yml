@@ -1,0 +1,49 @@
+groups:
+  - name: eve_copilot_aggregations
+    interval: 30s
+    rules:
+      # Service-level HTTP request rate (5m average)
+      - record: job:http_requests:rate5m
+        expr: sum(rate(http_requests_total[5m])) by (job, service)
+
+      # Service-level HTTP error rate (5xx errors, 5m average)
+      - record: job:http_errors:rate5m
+        expr: sum(rate(http_requests_total{status=~"5.."}[5m])) by (job, service)
+
+      # Service-level P95 latency
+      - record: job:http_request_duration:p95
+        expr: histogram_quantile(0.95, sum(rate(http_request_duration_seconds_bucket[5m])) by (job, service, le))
+
+      # Service-level P99 latency
+      - record: job:http_request_duration:p99
+        expr: histogram_quantile(0.99, sum(rate(http_request_duration_seconds_bucket[5m])) by (job, service, le))
+
+      # Service-level P50 latency
+      - record: job:http_request_duration:p50
+        expr: histogram_quantile(0.50, sum(rate(http_request_duration_seconds_bucket[5m])) by (job, service, le))
+
+      # Endpoint-level average duration (top 20 only to control cardinality)
+      - record: endpoint:http_request_duration:avg
+        expr: |
+          topk(20, avg by (endpoint, service) (
+            rate(http_request_duration_seconds_sum[5m]) /
+            rate(http_request_duration_seconds_count[5m])
+          ))
+
+      # Endpoint-level request rate (top 20 only)
+      - record: endpoint:http_requests:rate5m
+        expr: topk(20, sum(rate(http_requests_total[5m])) by (endpoint, service))
+
+      # Total request rate across all services
+      - record: cluster:http_requests:rate5m
+        expr: sum(rate(http_requests_total[5m]))
+
+      # Total error rate across all services
+      - record: cluster:http_errors:rate5m
+        expr: sum(rate(http_requests_total{status=~"5.."}[5m]))
+
+      # Error rate percentage by service
+      - record: job:http_error_rate:ratio
+        expr: |
+          sum(rate(http_requests_total{status=~"5.."}[5m])) by (job, service) /
+          sum(rate(http_requests_total[5m])) by (job, service)

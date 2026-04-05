@@ -1,0 +1,127 @@
+import { Meta } from '@storybook/addon-docs/blocks';
+
+<Meta title="Docs/Routing" />
+
+# Routing
+
+All routes are defined in `src/App.tsx`. Pages are lazy-loaded using `React.lazy()` with `Suspense` and a skeleton `PageLoader` fallback.
+
+## Public Routes (No Auth Required)
+
+These routes are accessible without EVE SSO authentication:
+
+| Path | Component | Description |
+|------|-----------|-------------|
+| `/auth/callback` | `AuthCallback` | EVE SSO OAuth callback handler |
+| `/impressum` | `Impressum` | Legal imprint (wrapped in Layout) |
+| `/datenschutz` | `Datenschutz` | Privacy policy (wrapped in Layout) |
+
+## Authenticated Routes
+
+All remaining routes are wrapped in `RequireAuth`, which checks `useAuth().isLoggedIn` and displays a login prompt if the user is not authenticated. Authenticated routes are wrapped in `Layout` which provides the sidebar navigation and header.
+
+### Home & Dashboard
+
+| Path | Component | Description |
+|------|-----------|-------------|
+| `/` | `Home` | Landing page / main dashboard (eagerly loaded) |
+| `/dashboard` | `Dashboard` | Personal pilot dashboard |
+| `/how-it-works` | `HowItWorks` | Platform guide and FAQ |
+
+### War Intelligence
+
+| Path | Component | Description |
+|------|-----------|-------------|
+| `/battle-report` | `BattleReport` | Battle report listing |
+| `/battle-map` | `BattleMap2D` | 2D battle visualization |
+| `/battle/:id` | `BattleDetail` | Individual battle analysis |
+| `/conflicts/:conflictId` | `ConflictDetail` | Conflict deep-dive |
+| `/war-economy` | `WarEconomy` | War economy analysis |
+| `/intel` | `Intel` | Intelligence tools hub |
+| `/ectmap` | `Ectmap` | Interactive star map |
+
+### Entity Detail Pages
+
+| Path | Component | Description |
+|------|-----------|-------------|
+| `/alliance/:allianceId` | `AllianceDetail` | Alliance intel (offensive, defensive, geography, etc.) |
+| `/powerbloc/:leaderAllianceId` | `PowerBlocDetail` | Coalition-level aggregated intel |
+| `/corporation/:corpId` | `CorporationDetail` | Corporation intel views |
+| `/system/:systemId` | `SystemDetail` | Solar system detail |
+
+### Navigation & Exploration
+
+| Path | Component | Description |
+|------|-----------|-------------|
+| `/navigation` | `Navigation` | Route planner |
+| `/route/:origin/:destination` | `RouteDetail` | Specific route analysis |
+| `/wormhole` | `WormholeIntel` | Wormhole intel and Thera router |
+
+### Market & Economy
+
+| Path | Component | Description |
+|------|-----------|-------------|
+| `/market` | `Market` | Market analysis hub |
+| `/supply-chain` | `SupplyChain` | Supply chain analysis |
+| `/supply-chain/:allianceId` | `SupplyChain` | Alliance-specific supply chain |
+| `/shopping` | `Shopping` | Shopping list manager |
+
+### Production & Industry
+
+| Path | Component | Description |
+|------|-----------|-------------|
+| `/production` | `Production` | Production dashboard |
+| `/production/projects` | `ProjectList` | Manufacturing project list |
+| `/production/projects/:projectId` | `ProjectDetail` | Project detail with planner |
+| `/production/pi` | `PlanetaryIndustry` | Planetary Industry advisor |
+| `/production/pi/:typeId` | `PIAdvisorDetail` | PI product detail |
+| `/doctrines` | `Doctrines` | Doctrine analysis and browsing |
+
+### Fittings
+
+| Path | Component | Description |
+|------|-----------|-------------|
+| `/fittings` | `Fittings` | Fitting browser (ESI + custom) |
+| `/fittings/compare` | `FittingComparison` | Side-by-side fitting comparison |
+| `/fittings/new` | `FittingEditor` | Fitting editor (create/import) |
+| `/fittings/esi/:fittingId` | `FittingDetail` | ESI fitting detail |
+| `/fittings/custom/:fittingId` | `FittingDetail` | Custom fitting detail |
+
+### Character Management
+
+| Path | Component | Description |
+|------|-----------|-------------|
+| `/characters` | `Characters` | Multi-character dashboard |
+
+### Corporation Management
+
+| Path | Component | Description |
+|------|-----------|-------------|
+| `/corp` | `CorpDashboard` | Corporation dashboard |
+| `/corp/finance` | `CorpFinance` | Corporation finances |
+| `/corp/hr` | `CorpHR` | Human resources management |
+| `/corp/srp` | `CorpSRP` | Ship Replacement Program |
+| `/corp/fleet` | `CorpFleet` | Fleet management |
+| `/corp/timers` | `CorpTimers` | Structure timer board |
+| `/corp/tools` | `CorpTools` | Corporation tools |
+
+### Account & Subscription
+
+| Path | Component | Description |
+|------|-----------|-------------|
+| `/pricing` | `Pricing` | Subscription pricing page |
+| `/subscription` | `Subscription` | Subscription management |
+| `/account` | `Account` | Account settings |
+
+### Redirects
+
+| From | To | Description |
+|------|----|-------------|
+| `/alliance-wars` | `/battle-report` | Legacy URL redirect |
+| `/trade-routes` | `/war-economy#routes` | Legacy URL redirect |
+
+### Catch-All
+
+| Path | Component | Description |
+|------|-----------|-------------|
+| `*` | `NotFound` | 404 page for unmatched routes |
