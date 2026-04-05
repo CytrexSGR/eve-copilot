@@ -336,3 +336,4 @@ MIT License - see [LICENSE](LICENSE) file for details.
 
 > This project was built using vibe coding — human vision and AI implementation working as equals.
 
+
