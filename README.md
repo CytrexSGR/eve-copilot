@@ -11,7 +11,7 @@ Comprehensive intelligence, industry, fitting analysis, and alliance management 
 ![Python](https://img.shields.io/badge/Python-3.11+-blue)
 ![React](https://img.shields.io/badge/React-19-61DAFB)
 ![TypeScript](https://img.shields.io/badge/TypeScript-5-3178C6)
-![License](https://img.shields.io/badge/License-MIT-green)
+![License](https://img.shields.io/badge/License-Apache_2.0-blue)
 
 ---
 
@@ -430,7 +430,9 @@ Contributions welcome! Please:
 
 ## 📝 License
 
-MIT License - see [LICENSE](LICENSE) file for details.
+Apache License 2.0 - see [LICENSE](LICENSE) file for details.
+
+The directories `ectmap/` and `sovmap/` contain third-party code by [EC Trade](http://edencom.net/) and remain under the MIT License (see `ectmap/LICENSE`, `sovmap/LICENSE`). Attribution for all bundled components is listed in [NOTICE](NOTICE).
 
 ---
 

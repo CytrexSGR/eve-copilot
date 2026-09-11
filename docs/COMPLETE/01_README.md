@@ -50,7 +50,7 @@ Instant notifications when combat spikes are detected (5+ kills in 5 minutes):
 ![Python](https://img.shields.io/badge/Python-3.11+-blue)
 ![React](https://img.shields.io/badge/React-18-61DAFB)
 ![TypeScript](https://img.shields.io/badge/TypeScript-5-3178C6)
-![License](https://img.shields.io/badge/License-MIT-green)
+![License](https://img.shields.io/badge/License-Apache_2.0-blue)
 ![Website](https://img.shields.io/website?url=https%3A%2F%2Feve.infinimind-creations.com&label=Live)
 ![Telegram](https://img.shields.io/badge/Telegram-Join%20Alerts-2CA5E0?logo=telegram)
 
@@ -308,7 +308,7 @@ Contributions welcome! Please:
 
 ## 📝 License
 
-MIT License - see [LICENSE](LICENSE) file for details.
+Apache License 2.0 - see [LICENSE](LICENSE) file for details.
 
 ---
 

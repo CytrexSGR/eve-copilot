@@ -35,4 +35,4 @@ Use [GitHub Issues](https://github.com/CytrexSGR/eve-copilot/issues) with the pr
 
 ## License
 
-By contributing, you agree that your contributions will be licensed under the MIT License.
+By contributing, you agree that your contributions will be licensed under the Apache License 2.0.

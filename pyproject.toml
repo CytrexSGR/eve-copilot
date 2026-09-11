@@ -1,6 +1,7 @@
 [project]
 name = "eve-copilot"
 version = "1.2.0"
+license = "Apache-2.0"
 description = "EVE Online industry and market analysis tool"
 requires-python = ">=3.11"
 dependencies = [
